@@ -1,0 +1,101 @@
+// DC Motor Control Test Program
+// Created: 2023-04-24
+// Purpose: Test program for controlling 4 DC motors using PWM signals
+#include <Arduino.h>
+
+// Pin configuration for motor control
+// PIN_DIR: Direction control pins for each motor
+// PIN_PWM: PWM control pins for each motor
+const uint8_t PIN_DIR[4] = { 15, 14 , 6 , 28 };
+const uint8_t PIN_PWM[4] = { 25, 24, 9, 29 };
+
+// PWM configuration parameters
+const int CONFIG_ANALOG_WRITE_FREQ = 30000;  // PWM frequency in Hz
+const int CONFIG_ANALOG_WRITE_RES = 12;      // PWM resolution in bits
+const int CONFIG_PWM_REVERSE[4] = { -1, 1, -1, 1 };  // Motor direction inversion flags
+const int MAX_PWM = (int)(pow(2, CONFIG_ANALOG_WRITE_RES)) - 1;  // Maximum PWM value based on resolution
+int PWM_out[4];  // Array to store current PWM values for each motor
+
+/**
+ * Updates the PWM and direction signals for a single motor
+ * @param pin_dir Direction control pin number
+ * @param pin_pwm PWM control pin number
+ * @param pwm_val PWM value (-MAX_PWM to MAX_PWM)
+ * @param if_reverse Direction inversion flag (1 or -1)
+ */
+void motor_pwm_update(int pin_dir, int pin_pwm, int pwm_val, int if_reverse = 1)
+{
+    // Apply direction inversion if specified
+    pwm_val = if_reverse * pwm_val;
+
+    if (pwm_val > 0)
+    {
+        digitalWrite(pin_dir, HIGH);
+        analogWrite(pin_pwm, MAX_PWM - pwm_val);
+    }
+    else if (pwm_val < 0)
+    {
+        digitalWrite(pin_dir, LOW);
+        analogWrite(pin_pwm, MAX_PWM + pwm_val);
+    }
+    else
+    {
+        digitalWrite(pin_dir, LOW);
+        analogWrite(pin_pwm, MAX_PWM);
+    }
+}
+
+/**
+ * Resets all motors to stop position
+ * Sets PWM to 0 for all motors
+ */
+void sys_reset()
+{
+    for (int i = 0; i < 4; i++)
+    {
+        motor_pwm_update(PIN_DIR[i], PIN_PWM[i], 0);
+    }
+}
+
+/**
+ * Initialization function
+ * Sets up serial communication, configures pins, and initializes PWM settings
+ */
+void setup()
+{
+    Serial.begin(115200);
+    
+    // Configure PWM resolution
+    analogWriteResolution(CONFIG_ANALOG_WRITE_RES);
+    
+    // Initialize all motor control pins
+    for (int i = 0; i < 4; i++)
+    {
+        pinMode(PIN_PWM[i], OUTPUT);
+        pinMode(PIN_DIR[i], OUTPUT);
+
+        // Set PWM frequency for each motor
+        analogWriteFrequency(PIN_PWM[i], CONFIG_ANALOG_WRITE_FREQ);
+
+        // Initialize motor to stop position
+        motor_pwm_update(PIN_DIR[i], PIN_PWM[i], 0);
+    }
+    sys_reset();
+
+    Serial.print("Hello World! Hello IEC!");
+    delay(3000);
+}
+
+/**
+ * Main control loop
+ * Continuously sets all motors to 50% power
+ * Note: This is a test program, so it runs all motors at constant speed
+ */
+void loop()
+{
+    for (int i = 0; i < 4; i++)
+    {
+        PWM_out[i] = (int)((double)(MAX_PWM) * 0.5);  // Set to 50% power
+        motor_pwm_update(PIN_DIR[i], PIN_PWM[i], PWM_out[i], CONFIG_PWM_REVERSE[i]);
+    }
+}

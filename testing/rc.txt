@@ -1,0 +1,28 @@
+#include <Arduino.h>
+#include <sbus.h>
+
+#define HW_SERIAL_INTERFACE_SBUS Serial1
+
+IEC::SBUS sbus(HW_SERIAL_INTERFACE_SBUS);
+uint16_t rc[16] = { 0 };
+
+void setup()
+{
+    Serial.begin(115200);
+    sbus.begin();
+
+}
+
+void loop()
+{
+    if (sbus.read(rc) == 1)
+    {
+        for (auto &r : rc)
+        {
+            Serial.print(r);
+            Serial.print(" ");
+        }
+        Serial.println();
+        Serial.flush();
+    }
+}

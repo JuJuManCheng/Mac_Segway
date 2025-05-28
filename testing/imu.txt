@@ -1,0 +1,51 @@
+// 2023-04-24
+
+#include <Arduino.h>
+#include "imu_mpu9255_utility.hpp"
+
+MPU9250 mpu9250(Wire, 0x68);
+
+struct IMU
+{
+    IMU()
+    {
+        memset(this, 0, sizeof(IMU));
+        
+    }
+    double accel[3];
+    double gyro[3];
+    double mag[3];
+};
+
+IMU imu;
+
+void setup()
+{
+    Serial.begin(115200);
+    imu_mpu9250_init(mpu9250);
+}
+
+void loop()
+{
+    // Read MPU9250 data
+    imu_mpu9250_update(mpu9250, imu.gyro, imu.accel, imu.mag);
+
+    // Print data
+    for (int i = 0; i < 3; i++)
+    {
+        Serial.print(imu.accel[i]);
+        Serial.print(" ");
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        Serial.print(imu.gyro[i]);
+        Serial.print(" ");
+    }
+    for (int i = 0; i < 3; i++)
+    {
+        Serial.print(imu.mag[i]);
+        Serial.print(" ");
+    }
+    Serial.println();
+    delay(1);
+}
