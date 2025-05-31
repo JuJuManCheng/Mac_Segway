@@ -3,6 +3,7 @@
 #include <LS7366R.h>
 #include "imu_mpu9255_utility.hpp"
 #include "MotorController.hpp"
+#include "Filter.hpp"
 
 // Hardware interface definitions
 #define HW_SERIAL_INTERFACE_SBUS Serial1
@@ -43,6 +44,17 @@ MotorController motorController(PIN_DIR, PIN_PWM, PWM_REVERSE, CONFIG_ANALOG_WRI
 LS7366R qei;
 IEC::SBUS sbus(HW_SERIAL_INTERFACE_SBUS);
 
+// ===== Filter Objects =====
+// RC command filter
+Filter::LowPassFilter1st rc_filter(RC_FILTER_Alpha);
+
+// IMU filters
+Filter::LowPassFilter2nd gyro_filter(0.8, 0.6);  // For gyroscope data
+Filter::LowPassFilter2nd accel_filter(0.8, 0.6); // For accelerometer data
+
+// Kalman Filter for attitude estimation
+Filter::KalmanFilter attitude_kf(4, 3);  // 4D state (quaternion), 3D measurement (accelerometer)
+
 // ===== Global Variables =====
 // RC Control
 uint16_t rc[16] = {0};
@@ -60,6 +72,8 @@ struct IMU {
     double accel[3];
     double gyro[3];
     double mag[3];
+    double filtered_accel[3];
+    double filtered_gyro[3];
 } imu;
 
 // Encoder Data
@@ -112,12 +126,6 @@ void get_vel(const std::array<double, 4>& current_pos,
     }
 }
 
-double low_pass_filter(double new_command) {
-    filtered_rc_command = RC_FILTER_Alpha * filtered_rc_command + 
-                         (1 - RC_FILTER_Alpha) * new_command;
-    return filtered_rc_command;
-}
-
 double RC_Process_command(uint16_t rc_value) {
     // Map RC input to velocity command
     if (rc_value <= RC_CENTER) {
@@ -127,7 +135,7 @@ double RC_Process_command(uint16_t rc_value) {
     }
 
     // Apply low-pass filter and deadband
-    rc_to_velCommand = low_pass_filter(rc_to_velCommand);
+    rc_to_velCommand = rc_filter.update(rc_to_velCommand);
     if (abs(rc_to_velCommand) < 5.0) {
         rc_to_velCommand = 0.0;
     }
@@ -185,13 +193,25 @@ void timerCallback() {
 
 // ===== Setup and Loop =====
 void setup() {
-
     Serial.begin(115200);               // Initialize serial communication
     sbus.begin();                       // Initialize SBUS
     qei.begin(PIN_QEI.data(), 4);       // Initialize encoders 
     imu_mpu9250_init(mpu9250);          // Initialize IMU
     motorController.init();             // Initialize motor controller
     motorController.stopAll();
+    
+    // Initialize Kalman Filter for attitude estimation
+    Eigen::MatrixXd H(3, 4);  // Measurement matrix
+    H << 1, 0, 0, 0,
+         0, 1, 0, 0,
+         0, 0, 1, 0;
+    attitude_kf.setMeasurementMatrix(H);
+    
+    // Set process and measurement noise
+    Eigen::MatrixXd Q = Eigen::MatrixXd::Identity(4, 4) * 0.1;
+    Eigen::MatrixXd R = Eigen::MatrixXd::Identity(3, 3) * 0.1;
+    attitude_kf.setProcessNoise(Q);
+    attitude_kf.setMeasurementNoise(R);
     
     timer100Hz.begin(timerCallback, 10000);  // 10000 microseconds = 100Hz    
     Serial.println("System initialized!");
@@ -216,8 +236,28 @@ void loop() {
     // Update IMU data
     imu_mpu9250_update(mpu9250, imu.gyro, imu.accel, imu.mag);
     
+    // Apply filters to IMU data
+    for (int i = 0; i < 3; i++) {
+        imu.filtered_gyro[i] = gyro_filter.update(imu.gyro[i]);
+        imu.filtered_accel[i] = accel_filter.update(imu.accel[i]);
+    }
+    
+    // Update attitude estimation using Kalman Filter
+    Eigen::VectorXd measurement(3);
+    measurement << imu.filtered_accel[0], imu.filtered_accel[1], imu.filtered_accel[2];
+    Eigen::VectorXd state = attitude_kf.update(measurement);
+    
     // Update motor powers
     for (int i = 0; i < 4; i++) {
         motorController.setPower(i, motor_power[i]);
+    }
+    
+    // Debug printing
+    if (millis() - last_print_time >= PRINT_INTERVAL) {
+        Serial.print("RC Command: "); Serial.print(rc_to_velCommand);
+        Serial.print(" | Roll: "); Serial.print(state[0]);
+        Serial.print(" | Pitch: "); Serial.print(state[1]);
+        Serial.print(" | Yaw: "); Serial.println(state[2]);
+        last_print_time = millis();
     }
 }
