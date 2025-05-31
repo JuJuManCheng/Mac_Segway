@@ -52,8 +52,8 @@ Filter::LowPassFilter1st rc_filter(RC_FILTER_Alpha);
 Filter::LowPassFilter2nd gyro_filter(0.8, 0.6);  // For gyroscope data
 Filter::LowPassFilter2nd accel_filter(0.8, 0.6); // For accelerometer data
 
-// Kalman Filter for attitude estimation
-Filter::KalmanFilter attitude_kf(4, 3);  // 4D state (quaternion), 3D measurement (accelerometer)
+// Simple Kalman Filter for attitude estimation
+Filter::SimpleKalmanFilter attitude_kf(0.1, 0.1);  // Process noise and measurement noise
 
 // ===== Global Variables =====
 // RC Control
@@ -200,19 +200,6 @@ void setup() {
     motorController.init();             // Initialize motor controller
     motorController.stopAll();
     
-    // Initialize Kalman Filter for attitude estimation
-    Eigen::MatrixXd H(3, 4);  // Measurement matrix
-    H << 1, 0, 0, 0,
-         0, 1, 0, 0,
-         0, 0, 1, 0;
-    attitude_kf.setMeasurementMatrix(H);
-    
-    // Set process and measurement noise
-    Eigen::MatrixXd Q = Eigen::MatrixXd::Identity(4, 4) * 0.1;
-    Eigen::MatrixXd R = Eigen::MatrixXd::Identity(3, 3) * 0.1;
-    attitude_kf.setProcessNoise(Q);
-    attitude_kf.setMeasurementNoise(R);
-    
     timer100Hz.begin(timerCallback, 10000);  // 10000 microseconds = 100Hz    
     Serial.println("System initialized!");
     Serial.println("Direction configuration:");
@@ -242,10 +229,8 @@ void loop() {
         imu.filtered_accel[i] = accel_filter.update(imu.accel[i]);
     }
     
-    // Update attitude estimation using Kalman Filter
-    Eigen::VectorXd measurement(3);
-    measurement << imu.filtered_accel[0], imu.filtered_accel[1], imu.filtered_accel[2];
-    Eigen::VectorXd state = attitude_kf.update(measurement);
+    // Update attitude estimation using Simple Kalman Filter
+    double roll = attitude_kf.update(imu.filtered_accel[0]);
     
     // Update motor powers
     for (int i = 0; i < 4; i++) {
@@ -255,9 +240,9 @@ void loop() {
     // Debug printing
     if (millis() - last_print_time >= PRINT_INTERVAL) {
         Serial.print("RC Command: "); Serial.print(rc_to_velCommand);
-        Serial.print(" | Roll: "); Serial.print(state[0]);
-        Serial.print(" | Pitch: "); Serial.print(state[1]);
-        Serial.print(" | Yaw: "); Serial.println(state[2]);
+        Serial.print(" | Roll: "); Serial.print(roll);
+        Serial.print(" | Pitch: "); Serial.print(imu.filtered_accel[1]);
+        Serial.print(" | Yaw: "); Serial.println(imu.filtered_accel[2]);
         last_print_time = millis();
     }
 }

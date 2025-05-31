@@ -3,7 +3,6 @@
 
 #include <array>
 #include <cmath>
-#include <Eigen/Dense>
 
 class Filter {
 public:
@@ -54,114 +53,35 @@ public:
         double filtered_value2_;     // Second stage filtered value
     };
 
-    // Kalman Filter
-    class KalmanFilter {
+    // Simple Kalman Filter for 1D state
+    class SimpleKalmanFilter {
     public:
-        KalmanFilter(int state_dim, int measurement_dim) 
-            : state_dim_(state_dim), measurement_dim_(measurement_dim) {
-            // Initialize matrices
-            x_ = Eigen::VectorXd::Zero(state_dim_);        // State estimate
-            P_ = Eigen::MatrixXd::Identity(state_dim_, state_dim_);  // Error covariance
-            Q_ = Eigen::MatrixXd::Identity(state_dim_, state_dim_);  // Process noise
-            R_ = Eigen::MatrixXd::Identity(measurement_dim_, measurement_dim_);  // Measurement noise
-            H_ = Eigen::MatrixXd::Zero(measurement_dim_, state_dim_);  // Measurement matrix
-            F_ = Eigen::MatrixXd::Identity(state_dim_, state_dim_);  // State transition matrix
-        }
-
-        void setProcessNoise(const Eigen::MatrixXd& Q) { Q_ = Q; }
-        void setMeasurementNoise(const Eigen::MatrixXd& R) { R_ = R; }
-        void setMeasurementMatrix(const Eigen::MatrixXd& H) { H_ = H; }
-        void setStateTransitionMatrix(const Eigen::MatrixXd& F) { F_ = F; }
-
-        Eigen::VectorXd update(const Eigen::VectorXd& measurement) {
-            // Predict
-            x_ = F_ * x_;
-            P_ = F_ * P_ * F_.transpose() + Q_;
-
-            // Update
-            Eigen::MatrixXd K = P_ * H_.transpose() * 
-                               (H_ * P_ * H_.transpose() + R_).inverse();
-            x_ = x_ + K * (measurement - H_ * x_);
-            P_ = (Eigen::MatrixXd::Identity(state_dim_, state_dim_) - K * H_) * P_;
-
-            return x_;
-        }
-
-        void reset(const Eigen::VectorXd& initial_state) {
-            x_ = initial_state;
-            P_ = Eigen::MatrixXd::Identity(state_dim_, state_dim_);
-        }
-
-    private:
-        int state_dim_;
-        int measurement_dim_;
-        Eigen::VectorXd x_;      // State estimate
-        Eigen::MatrixXd P_;      // Error covariance
-        Eigen::MatrixXd Q_;      // Process noise
-        Eigen::MatrixXd R_;      // Measurement noise
-        Eigen::MatrixXd H_;      // Measurement matrix
-        Eigen::MatrixXd F_;      // State transition matrix
-    };
-
-    // Extended Kalman Filter
-    class ExtendedKalmanFilter {
-    public:
-        ExtendedKalmanFilter(int state_dim, int measurement_dim) 
-            : state_dim_(state_dim), measurement_dim_(measurement_dim) {
-            // Initialize matrices
-            x_ = Eigen::VectorXd::Zero(state_dim_);        // State estimate
-            P_ = Eigen::MatrixXd::Identity(state_dim_, state_dim_);  // Error covariance
-            Q_ = Eigen::MatrixXd::Identity(state_dim_, state_dim_);  // Process noise
-            R_ = Eigen::MatrixXd::Identity(measurement_dim_, measurement_dim_);  // Measurement noise
-        }
-
-        void setProcessNoise(const Eigen::MatrixXd& Q) { Q_ = Q; }
-        void setMeasurementNoise(const Eigen::MatrixXd& R) { R_ = R; }
-
-        // Function pointers for state transition and measurement functions
-        using StateTransitionFunc = std::function<Eigen::VectorXd(const Eigen::VectorXd&)>;
-        using MeasurementFunc = std::function<Eigen::VectorXd(const Eigen::VectorXd&)>;
-        using JacobianFunc = std::function<Eigen::MatrixXd(const Eigen::VectorXd&)>;
-
-        void setStateTransitionFunction(StateTransitionFunc f) { f_ = f; }
-        void setMeasurementFunction(MeasurementFunc h) { h_ = h; }
-        void setStateTransitionJacobian(JacobianFunc F) { F_ = F; }
-        void setMeasurementJacobian(JacobianFunc H) { H_ = H; }
-
-        Eigen::VectorXd update(const Eigen::VectorXd& measurement) {
-            // Predict
-            x_ = f_(x_);
-            Eigen::MatrixXd F = F_(x_);
-            P_ = F * P_ * F.transpose() + Q_;
-
-            // Update
-            Eigen::MatrixXd H = H_(x_);
-            Eigen::MatrixXd K = P_ * H.transpose() * 
-                               (H * P_ * H.transpose() + R_).inverse();
-            x_ = x_ + K * (measurement - h_(x_));
-            P_ = (Eigen::MatrixXd::Identity(state_dim_, state_dim_) - K * H) * P_;
-
-            return x_;
-        }
-
-        void reset(const Eigen::VectorXd& initial_state) {
-            x_ = initial_state;
-            P_ = Eigen::MatrixXd::Identity(state_dim_, state_dim_);
-        }
-
-    private:
-        int state_dim_;
-        int measurement_dim_;
-        Eigen::VectorXd x_;      // State estimate
-        Eigen::MatrixXd P_;      // Error covariance
-        Eigen::MatrixXd Q_;      // Process noise
-        Eigen::MatrixXd R_;      // Measurement noise
+        SimpleKalmanFilter(double process_noise, double measurement_noise) 
+            : process_noise_(process_noise), measurement_noise_(measurement_noise),
+              estimate_(0.0), estimate_error_(1.0) {}
         
-        // Function pointers
-        StateTransitionFunc f_;  // State transition function
-        MeasurementFunc h_;      // Measurement function
-        JacobianFunc F_;         // State transition Jacobian
-        JacobianFunc H_;         // Measurement Jacobian
+        double update(double measurement) {
+            // Predict
+            double prediction_error = estimate_error_ + process_noise_;
+            
+            // Update
+            double kalman_gain = prediction_error / (prediction_error + measurement_noise_);
+            estimate_ = estimate_ + kalman_gain * (measurement - estimate_);
+            estimate_error_ = (1.0 - kalman_gain) * prediction_error;
+            
+            return estimate_;
+        }
+
+        void reset(double initial_value = 0.0) {
+            estimate_ = initial_value;
+            estimate_error_ = 1.0;
+        }
+
+    private:
+        double process_noise_;      // Process noise variance
+        double measurement_noise_;  // Measurement noise variance
+        double estimate_;          // Current state estimate
+        double estimate_error_;    // Current estimate error
     };
 };
 
