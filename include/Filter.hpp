@@ -16,7 +16,7 @@ public:
         LowPassFilter1st(double alpha) : alpha_(alpha), filtered_value_(0.0) {}
         
         double update(double new_value) {
-            filtered_value_ = alpha_ * filtered_value_ + (1.0 - alpha_) * new_value;
+            filtered_value_ = alpha_ * new_value + (1.0 - alpha_) * filtered_value_;
             return filtered_value_;
         }
 
