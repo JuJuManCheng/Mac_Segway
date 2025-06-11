@@ -48,8 +48,13 @@ const array<double, 4> Kd = {0.0, 0.0, 0.0, 0.0};          // Derivative gains
 
 // IMU Calibration parameters
 // Replace these values with your calibration results from acc_calibration.npz
-const double accel_offset[3] = {0.08584888, 0.06509522, 0.43634443}; // <-- paste your offset here
-const double accel_scale[3]  = {0.99995425, 1.00013127, 1.00013127}; // <-- paste your scale here
+const double accel_offset[3] = {0.08584888, 0.06509522, 0.43634443}; 
+const double accel_scale[3]  = {0.99995425, 1.00013127, 1.00013127}; 
+
+const double gyro_offset[3] = {0.04281961, 0.18707194, 0.1028051}; 
+
+const double mag_offset[3] = {0.08584888, 0.06509522, 0.43634443}; 
+const double mag_scale[3]  = {0.99995425, 1.00013127, 1.00013127}; 
 
 // ===== Global Objects =====
 MPU9250 mpu9250(Wire, 0x68);
@@ -339,7 +344,9 @@ void loop() {
     // === Apply accelerometer calibration ===
 
     for (int i = 0; i < 3; ++i) {
-        imu.accel[i] = (imu.accel[i] - accel_offset[i]) / accel_scale[i];
+        imu.accel[i] = accel_scale[i] * (imu.accel[i] - accel_offset[i]);
+        imu.gyro[i] = imu.gyro[i] - gyro_offset[i];
+        imu.mag[i] = mag_scale[i] * (imu.mag[i] - mag_offset[i]);
     }
 
     // Update motor powers
