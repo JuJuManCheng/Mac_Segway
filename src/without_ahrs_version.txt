@@ -9,12 +9,8 @@
 #include "imu_mpu9255_utility.hpp"
 #include "MotorController.hpp"
 #include <iostream>
-#include <vector>
-#include "../lib/orientation/orientation.hpp"
-#include <simple_timer.hpp>
 
 #define M_PI 3.14159265358979323846
-#define AHRS_UPDATE_PERIOD_MICROS 1000
 
 using namespace std;
 
@@ -41,7 +37,7 @@ const uint16_t RC_CENTER = 1046;                           // Center RC input va
 const double MAX_SPEED = 30.0;                             // Maximum speed in rad/s
 
 // ===== Control Loop Configuration =====
-const double T = (double)(AHRS_UPDATE_PERIOD_MICROS) / 1000000.0;;                                     // 100Hz control loop period
+const double T = 0.005;                                     // 100Hz control loop period
 const double rc_fc = 50;
 const double RC_FILTER_TAU = 1 / (2*PI*rc_fc);             // time constant for RC filtering
 const double RC_FILTER_Alpha = exp(-T / RC_FILTER_TAU);    // Filter coefficient
@@ -57,10 +53,14 @@ const array<double, 4> Kp = {300.0, 300.0, 300.0, 300.0};  // Proportional gains
 const array<double, 4> Ki = {1000.0, 1000.0, 1000.0, 1000.0};      // Integral gains
 const array<double, 4> Kd = {0.0, 0.0, 0.0, 0.0};          // Derivative gains
 
-// ===== Attitude =====
-array<double, 3> attitude = {0.0, 0.0, 0.0}; // attitude[0]=roll, [1]=pitch, [2]=yaw
-array<double, 3> Segway_ang_vel = {0.0, 0.0, 0.0}; // Segway_ang_vel[0]=roll rate, [1]=pitch rate, [2]=yaw rate
-array<double, 3> Segway_accel = {0.0, 0.0, 0.0}; // Segway_accel[0]=x acc, [1]=y acc, [2]=z acc
+// IMU Calibration parameters
+// Replace these values with your calibration results from acc_calibration.npz
+const double accel_offset[3] = {0.08584888, 0.06509522, 0.43634443}; 
+const double accel_scale[3]  = {0.99995425, 1.00013127, 1.00013127}; 
+const double gyro_offset[3] = {-0.00052174, -0.00141906, }; 
+const double mag_offset[3] = {0.85944262, 0.86660839, 0.8194259}; 
+const double mag_scale[3]  = {-22.12384694, 9.10097617, -30.60021924}; 
+
 
 // ===== Global Objects =====
 MPU9250 mpu9250(Wire, 0x68);
@@ -79,12 +79,22 @@ static int last_aux2 = -1; // 初始狀態為 -1 表示第一次執行
 // Motor Control
 std::array<double, 4> motor_power = {0.0, 0.0, 0.0, 0.0};
 
+// IMU Data
+struct IMU {
+    IMU() { memset(this, 0, sizeof(IMU)); }
+    double accel[3];
+    double gyro[3];
+    double mag[3];
+    double filtered_accel[3];
+    double filtered_gyro[3];
+} imu;
+
 // Encoder Data
 array<double, 4> pos = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> last_pos = {0.0, 0.0, 0.0, 0.0};
-array<double, 4> wheel_ang_vel = {0.0, 0.0, 0.0, 0.0};
-array<double, 4> wheel_ang_vel_prev = {0.0, 0.0, 0.0, 0.0};
-array<double, 4> filtered_wheel_ang_vel = {0.0, 0.0, 0.0, 0.0};
+array<double, 4> ang_vel = {0.0, 0.0, 0.0, 0.0};
+array<double, 4> ang_vel_prev = {0.0, 0.0, 0.0, 0.0};
+array<double, 4> filtered_ang_vel = {0.0, 0.0, 0.0, 0.0};
 
 // PID Variables
 array<double, 4> e = {0.0, 0.0, 0.0, 0.0};
@@ -124,108 +134,18 @@ struct RC_Command {
 
 RC_Command rc_command;
 
-// ===== Madgwick AHRS & Orientation Integration =====
-#define AHRS_UPDATE_PERIOD_MICROS 1250 // 姿態解算更新週期（微秒）
-
-Orientation orient; // 姿態解算物件
-imu_data_t imu_raw; // 原始IMU資料結構
-vector<float> orientation_buffer; // 暫存姿態資料用
-
-// ===== SimpleTimer 物件宣告 =====
-SimpleTimer ahrs_timer, serial_timer;
-
 // ===== Helper Functions =====
-double sign(double x);
-void reset();
-double low_pass_filter(double new_value, double pre_val);
-void get_vel(array<double, 4>& pos, array<double, 4>& last_pos, array<double, 4>& wheel_ang_vel);
-double RC_Process_command(uint16_t* rc_values);
-void PID_controller(double rc_to_velCommand);
-void print_data();
-void routine();
-void attitude_init(MPU9250& mpu, imu_data_t& imu_raw, Orientation& orient, double T);
-void get_sensor_data();
-
-// ===== Setup and Loop =====
-void setup() {
-    Serial.begin(115200);               // 初始化序列埠
-    sbus.begin();                       // 初始化SBUS
-    qei.begin(PIN_QEI.data(), 4);       // 初始化編碼器
-    imu_mpu9250_init(mpu9250);          // 初始化IMU
-    pinMode(voltage_pin, INPUT);        // 初始化電壓腳位
-    analogReadResolution(12);           // 設定類比讀取解析度為12位元
-    motorController.init();             // 初始化馬達控制器
-    motorController.stopAll();          // 停止所有馬達
-    reset();                            // 重設控制變數
-    timer.begin(routine, T*1000000);    // 啟動100Hz主控迴圈
-    Serial.println("System initialized!");
-    Serial.println("Direction configuration:");
-    delay(3000);
-
-    // ===== 姿態解算初始化 =====
-    attitude_init(mpu9250, imu_raw, orient, T);
-    ahrs_timer.begin();
-    serial_timer.begin();
-}
-
-void loop() {
-    // 讀取SBUS資料
-    sbus.read(rc);
-    voltage = 0.0078 * (double)(analogRead(voltage_pin)); // 類比電壓轉換
-    // 讀取編碼器位置
-    qei.read();
-    for (int i = 0; i < 4; i++) {
-        pos[i] = (i % 2 == 0) ? qei.get_pulse()[i] : -qei.get_pulse()[i];
-    }
-    // ===== 姿態解算與資料傳送 =====
-    // 更新IMU資料（給姿態解算用）
-    imu_mpu9250_update(mpu9250, imu_raw.gyro, imu_raw.accel, imu_raw.mag);
-    // 依指定週期更新姿態解算
-    if (ahrs_timer.elapsed() >= AHRS_UPDATE_PERIOD_MICROS) {
-        ahrs_timer.begin();
-        orient.update(imu_raw); // 姿態解算更新
-    }
-    
-    // 更新馬達輸出
-    for (int i = 0; i < 4; i++) {
-        motorController.setPower(i, motor_power[i]);
-    }
-}
-
-void routine() {
-    // Process RC command
-    rc_to_velCommand = RC_Process_command(rc);
-
-    get_sensor_data(pos, last_pos, wheel_ang_vel, Segway_ang_vel, Segway_accel, orient);
-
-    if (rc_command.aux2 == 2) {  // 使用 aux2 作為啟動開關
-
-        // Apply PID control
-        PID_controller(rc_to_velCommand);
-        pre_rc_to_velCommand = rc_to_velCommand;
-    } 
-    else if (rc_command.aux2 == 1){
-        motor_power = {0.0, 0.0, rc_to_velCommand, 0.0};
-    }
-    else {
-        // Stop motors if RC switch is off
-        motor_power = {0.0, 0.0, 0.0, 0.0};
-        reset();
-    }
-    
-    print_data();
-}
-
-// ===== Function Definitions (after setup/loop) =====
 double sign(double x) {
     if (x > 0.0) return 1.0;
     if (x < 0.0) return -1.0;
     return 0.0;
 }
 
+// ===== Control Functions =====
 void reset() {
     rc_to_velCommand = 0.0;
     pre_rc_to_velCommand = 0.0;
+
     e.fill(0.0);
     e_integral.fill(0.0);
     e_derivative.fill(0.0);
@@ -237,29 +157,11 @@ double low_pass_filter(double new_value, double pre_val){
     return filtered_val;
 }
 
-void get_sensor_data(array<double, 4>& pos, array<double, 4>& last_pos, array<double, 4>& wheel_ang_vel, array<double, 3>& Segway_ang_vel, array<double, 3>& Segway_accel, Orientation& orient){
-    get_vel(pos, last_pos, wheel_ang_vel); // Wheel angular velocity
-
-    // Segway attitude
-    const double* euler = orient.get_euler();
-    attitude[0] = euler[0] * RAD_TO_DEG; // roll
-    attitude[1] = euler[1] * RAD_TO_DEG; // pitch
-    attitude[2] = euler[2] * RAD_TO_DEG; // yaw
-    
-    //IMU data
-    Segway_accel[0] = orient.get_filtered_accel()[0]; // x acc
-    Segway_accel[1] = orient.get_filtered_accel()[1]; // y acc
-    Segway_accel[2] = orient.get_filtered_accel()[2]; // z acc
-    Segway_ang_vel[0] = orient.get_filtered_gyro()[0]; // roll rate
-    Segway_ang_vel[1] = orient.get_filtered_gyro()[1]; // pitch rate
-    Segway_ang_vel[2] = orient.get_filtered_gyro()[2]; // yaw rate
-}
-
 void get_vel(array<double, 4>& pos, array<double, 4>& last_pos, array<double, 4>& ang_vel) {
     for (int j = 0; j < 4; j++) {
-        wheel_ang_vel[j] = (pos[j] - last_pos[j]) * 2.0 * PI / (T * count_perRev);
-        filtered_wheel_ang_vel[j] = low_pass_filter(wheel_ang_vel[j], filtered_wheel_ang_vel[j]);
-        wheel_ang_vel_prev[j] = wheel_ang_vel[j];
+        ang_vel[j] = (pos[j] - last_pos[j]) * 2.0 * PI / (T * count_perRev);
+        filtered_ang_vel[j] = low_pass_filter(ang_vel[j], filtered_ang_vel[j]);
+        ang_vel_prev[j] = ang_vel[j];
         last_pos[j] = pos[j];
     }
 }
@@ -337,7 +239,7 @@ double RC_Process_command(uint16_t* rc_values) {
 void PID_controller(double rc_to_velCommand) {
     for (int j = 0; j < 4; j++) {
         // Calculate error terms
-        e[j] = rc_to_velCommand - filtered_wheel_ang_vel[j];
+        e[j] = rc_to_velCommand - filtered_ang_vel[j];
         
         // Reset integral when target speed sign changes
         if (sign(rc_to_velCommand) != sign(pre_rc_to_velCommand)) {
@@ -370,30 +272,6 @@ void PID_controller(double rc_to_velCommand) {
     }
 }
 
-void attitude_init(MPU9250& mpu, imu_data_t& imu_raw, Orientation& orient, double T) {
-    imu_data_t imu_temp;
-    int idx = 0;
-    SimpleTimer bias_timer;
-    bias_timer.begin();
-    while (bias_timer.elapsed() < 5000000) { // 5秒累積平均
-        imu_mpu9250_update(mpu, imu_raw.gyro, imu_raw.accel, imu_raw.mag);
-        for (int i = 0; i < 3; i++) {
-            imu_temp.accel[i] += imu_raw.accel[i];
-            imu_temp.gyro[i] += imu_raw.gyro[i];
-            imu_temp.mag[i] += imu_raw.mag[i];
-        }
-        idx++;
-        delay(1);
-    }
-    for (int i = 0; i < 3; i++) {
-        imu_temp.accel[i] /= (double)(idx); // 平均加速度
-        imu_temp.gyro[i] /= (double)(idx);  // 平均陀螺儀
-        imu_temp.mag[i] /= (double)(idx);   // 平均磁力計
-    }
-    orient.init(T, imu_temp.accel, imu_temp.mag, imu_temp.gyro); // 初始化姿態解算器
-}
-
-
 void print_data(){
     // Serial.print(rc_to_velCommand, 3);
     // Serial.print(" ");
@@ -404,12 +282,78 @@ void print_data(){
     //     Serial.print(filtered_ang_vel[i], 3);
     //     Serial.print(" ");
     // }
-    for(int i = 0; i < 3; i++){
-        Serial.print(attitude[i], 3);
-        Serial.print(" ");
-    }
     Serial.println();
 }
 
+// ===== Routine =====
+void routine() {
+    
+    // Process RC command
+    rc_to_velCommand = RC_Process_command(rc);
+
+    // Calculate angular velocities
+    get_vel(pos, last_pos, ang_vel);
+    if (rc_command.aux2 == 2) {  // 使用 aux2 作為啟動開關
+
+        // Apply PID control
+        PID_controller(rc_to_velCommand);
+        pre_rc_to_velCommand = rc_to_velCommand;
+    } 
+    else if (rc_command.aux2 == 1){
+        motor_power = {0.0, 0.0, rc_to_velCommand, 0.0};
+    }
+    else {
+        // Stop motors if RC switch is off
+        motor_power = {0.0, 0.0, 0.0, 0.0};
+        reset();
+    }
+    
+    print_data();
+}
+
+// ===== Setup and Loop =====
+void setup() {
+    Serial.begin(115200);               // Initialize serial communication
+    sbus.begin();                       // Initialize SBUS
+    qei.begin(PIN_QEI.data(), 4);       // Initialize encoders 
+    imu_mpu9250_init(mpu9250);          // Initialize IMU
+    pinMode(voltage_pin, INPUT);        // Initialize voltage pin
+    analogReadResolution(12);           // Set analog read resolution to 12 bits
+    motorController.init();             // Initialize motor controller
+    motorController.stopAll();
+    reset();
+    
+    timer.begin(routine, T*1000000);  // 1000000 microseconds = 100Hz   
+    Serial.println("System initialized!");
+    Serial.println("Direction configuration:");
+    delay(3000);
+}
+
+void loop() {
+    // Read SBUS data
+    sbus.read(rc);
+    voltage = 0.0078 * (double)(analogRead(voltage_pin)); // Convert analog reading to voltage
+    // Read encoder positions
+    qei.read();
+    for (int i = 0; i < 4; i++) {
+        pos[i] = (i % 2 == 0) ? qei.get_pulse()[i] : -qei.get_pulse()[i];
+    }
+    
+    // Update IMU data
+    imu_mpu9250_update(mpu9250, imu.gyro, imu.accel, imu.mag);
+
+    // === Apply accelerometer calibration ===
+
+    for (int i = 0; i < 3; ++i) {
+        imu.accel[i] = accel_scale[i] * (imu.accel[i] - accel_offset[i]);
+        imu.gyro[i] = imu.gyro[i] - gyro_offset[i];
+        imu.mag[i] = mag_scale[i] * (imu.mag[i] - mag_offset[i]);
+    }
+
+    // Update motor powers
+    for (int i = 0; i < 4; i++) {
+        motorController.setPower(i, motor_power[i]);
+    }
+}
 
 
