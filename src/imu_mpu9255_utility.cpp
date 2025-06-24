@@ -28,20 +28,7 @@ void imu_mpu9250_update(MPU9250& mpu, double* gyro, double* accel, double* mag) 
     mpu.readSensor();
     
     // Update accelerometer data
-    // accel[0] = (double)mpu.getAccelX_mss();
-    // accel[1] = (double)mpu.getAccelY_mss();
-    // accel[2] = (double)mpu.getAccelZ_mss();
-    
-    // // Update gyroscope data
-    // gyro[0] = (double)mpu.getGyroX_rads();
-    // gyro[1] = (double)mpu.getGyroY_rads();
-    // gyro[2] = (double)mpu.getGyroZ_rads();
-    
-    // // Update magnetometer data
-    // mag[0] = (double)mpu.getMagX_uT();
-    // mag[1] = (double)mpu.getMagY_uT();
-    // mag[2] = (double)mpu.getMagZ_uT();
-    
+
     gyro[0] = (double)(-mpu.getGyroY_rads());
     gyro[1] = (double)(-mpu.getGyroX_rads());
     gyro[2] = (double)(-mpu.getGyroZ_rads());

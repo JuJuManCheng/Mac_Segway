@@ -13,9 +13,6 @@
 #include "../lib/orientation/orientation.hpp"
 #include <simple_timer.hpp>
 
-#define M_PI 3.14159265358979323846
-#define AHRS_UPDATE_PERIOD_MICROS 1000
-
 using namespace std;
 
 // Hardware interface definitions
@@ -26,13 +23,31 @@ double voltage = 0.0;
 // ===== Pin Configurations =====
 const array<uint8_t, 4> PIN_DIR = {15, 14, 6, 28};    // Direction pins
 const array<uint8_t, 4> PIN_PWM = {25, 24, 9, 29};    // PWM pins
-const array<int, 4> PWM_REVERSE = {-1, 1, -1, 1};     // Motor direction multipliers
+const array<int, 4> PWM_REVERSE = {-1, 1, -1, 1};
+const array<std::array<double, 3>, 4> PWM_MAP_MATRIX = {{
+    array<double, 3>{1.0, 1.0, 1.0},
+    array<double, 3>{-1.0, 1.0, 1.0},
+    array<double, 3>{1.0,  1.0, -1.0},
+    array<double, 3>{-1.0, 1.0, -1.0}
+}};
+
 const array<uint8_t, 4> PIN_QEI = {30, 31, 33, 32};   // Quadrature encoder pins
 
 // ===== PWM Configuration =====
 const int CONFIG_ANALOG_WRITE_FREQ = 30000;                // PWM frequency in Hz
 const int CONFIG_ANALOG_WRITE_RES = 12;                    // PWM resolution in bits
 const int MAX_PWM = (int)(pow(2, CONFIG_ANALOG_WRITE_RES)) - 1;  // Maximum PWM value
+
+// ===== Madgwick AHRS & Orientation Integration =====
+#define AHRS_UPDATE_PERIOD_MICROS 1250 // 姿態解算更新週期（微秒）
+double T_AHRS  = (double)(AHRS_UPDATE_PERIOD_MICROS) / 1000000.0;
+Orientation orient; // 姿態解算物件
+imu_data_t imu_raw; // 原始IMU資料結構
+vector<float> orientation_buffer; // 暫存姿態資料用
+
+// ===== SimpleTimer 物件宣告 =====
+SimpleTimer ahrs_timer, serial_timer;
+
 
 // ===== RC Input Configuration =====
 const uint16_t RC_MIN = 200;                               // Minimum RC input value
@@ -41,7 +56,7 @@ const uint16_t RC_CENTER = 1046;                           // Center RC input va
 const double MAX_SPEED = 30.0;                             // Maximum speed in rad/s
 
 // ===== Control Loop Configuration =====
-const double T = (double)(AHRS_UPDATE_PERIOD_MICROS) / 1000000.0;;                                     // 100Hz control loop period
+const double T = 0.005;                                      
 const double rc_fc = 50;
 const double RC_FILTER_TAU = 1 / (2*PI*rc_fc);             // time constant for RC filtering
 const double RC_FILTER_Alpha = exp(-T / RC_FILTER_TAU);    // Filter coefficient
@@ -71,17 +86,17 @@ IEC::SBUS sbus(HW_SERIAL_INTERFACE_SBUS);
 // ===== Global Variables =====
 // RC Control
 uint16_t rc[16] = {0};
-double rc_to_velCommand = 0.0;
-double pre_rc_to_velCommand = 0.0;
-double filtered_rc_command = 0.0;
+array<double, 4> rc_to_velCommand = {0.0, 0.0, 0.0, 0.0};
+array<double, 4> pre_rc_to_velCommand = {0.0, 0.0, 0.0, 0.0};
+array<double, 4> filtered_rc_command = {0.0, 0.0, 0.0, 0.0};
 static int last_aux2 = -1; // 初始狀態為 -1 表示第一次執行
 
 // Motor Control
 std::array<double, 4> motor_power = {0.0, 0.0, 0.0, 0.0};
 
 // Encoder Data
-array<double, 4> pos = {0.0, 0.0, 0.0, 0.0};
-array<double, 4> last_pos = {0.0, 0.0, 0.0, 0.0};
+array<double, 4> wheel_pos = {0.0, 0.0, 0.0, 0.0};
+array<double, 4> wheel_last_pos = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> wheel_ang_vel = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> wheel_ang_vel_prev = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> filtered_wheel_ang_vel = {0.0, 0.0, 0.0, 0.0};
@@ -113,7 +128,7 @@ enum RC_CHANNEL {
 // RC command structure
 struct RC_Command {
     double throttle;    // 油門值
-    double roll;        // 左右值
+    double lateral;        // 左右值
     double pitch;       // 前後值
     double yaw;         // 轉向值
     int mode;          // 模式
@@ -124,28 +139,20 @@ struct RC_Command {
 
 RC_Command rc_command;
 
-// ===== Madgwick AHRS & Orientation Integration =====
-#define AHRS_UPDATE_PERIOD_MICROS 1250 // 姿態解算更新週期（微秒）
-
-Orientation orient; // 姿態解算物件
-imu_data_t imu_raw; // 原始IMU資料結構
-vector<float> orientation_buffer; // 暫存姿態資料用
-
-// ===== SimpleTimer 物件宣告 =====
-SimpleTimer ahrs_timer, serial_timer;
-
 // ===== Helper Functions =====
 double sign(double x);
+double mapf(int x, double in_min, double in_max, double out_min, double out_max);
 void reset();
 double low_pass_filter(double new_value, double pre_val);
-void get_vel(array<double, 4>& pos, array<double, 4>& last_pos, array<double, 4>& wheel_ang_vel);
-double RC_Process_command(uint16_t* rc_values);
-void PID_controller(double rc_to_velCommand);
+void get_vel(array<double, 4>& wheel_pos, array<double, 4>& wheel_last_pos, array<double, 4>& wheel_ang_vel);
+array<double, 4> RC_Process_command(uint16_t* rc_values);
+void PID_controller(array<double, 4>& rc_to_velCommand);
 void print_data();
 void routine();
-void attitude_init(MPU9250& mpu, imu_data_t& imu_raw, Orientation& orient, double T);
-void get_sensor_data();
+void attitude_init();
+void get_sensor_data(array<double, 4>& wheel_pos, array<double, 4>& wheel_last_pos, array<double, 4>& wheel_ang_vel, array<double, 3>& Segway_ang_vel, array<double, 3>& Segway_accel, Orientation& orient);
 
+int elapTime = 0;
 // ===== Setup and Loop =====
 void setup() {
     Serial.begin(115200);               // 初始化序列埠
@@ -157,15 +164,14 @@ void setup() {
     motorController.init();             // 初始化馬達控制器
     motorController.stopAll();          // 停止所有馬達
     reset();                            // 重設控制變數
-    timer.begin(routine, T*1000000);    // 啟動100Hz主控迴圈
+    timer.begin(routine, T*1000000);    
     Serial.println("System initialized!");
     Serial.println("Direction configuration:");
     delay(3000);
 
     // ===== 姿態解算初始化 =====
-    attitude_init(mpu9250, imu_raw, orient, T);
+    attitude_init();
     ahrs_timer.begin();
-    serial_timer.begin();
 }
 
 void loop() {
@@ -175,7 +181,7 @@ void loop() {
     // 讀取編碼器位置
     qei.read();
     for (int i = 0; i < 4; i++) {
-        pos[i] = (i % 2 == 0) ? qei.get_pulse()[i] : -qei.get_pulse()[i];
+        wheel_pos[i] = (i % 2 == 0) ? qei.get_pulse()[i] : -qei.get_pulse()[i];
     }
     // ===== 姿態解算與資料傳送 =====
     // 更新IMU資料（給姿態解算用）
@@ -184,6 +190,7 @@ void loop() {
     if (ahrs_timer.elapsed() >= AHRS_UPDATE_PERIOD_MICROS) {
         ahrs_timer.begin();
         orient.update(imu_raw); // 姿態解算更新
+        elapTime = ahrs_timer.get_time_duration();
     }
     
     // 更新馬達輸出
@@ -196,21 +203,20 @@ void routine() {
     // Process RC command
     rc_to_velCommand = RC_Process_command(rc);
 
-    get_sensor_data(pos, last_pos, wheel_ang_vel, Segway_ang_vel, Segway_accel, orient);
+    get_sensor_data(wheel_pos, wheel_last_pos, wheel_ang_vel, Segway_ang_vel, Segway_accel, orient);
 
     if (rc_command.aux2 == 2) {  // 使用 aux2 作為啟動開關
-
         // Apply PID control
         PID_controller(rc_to_velCommand);
         pre_rc_to_velCommand = rc_to_velCommand;
     } 
     else if (rc_command.aux2 == 1){
-        motor_power = {0.0, 0.0, rc_to_velCommand, 0.0};
-    }
-    else {
-        // Stop motors if RC switch is off
         motor_power = {0.0, 0.0, 0.0, 0.0};
         reset();
+    }
+    else {
+        PID_controller(rc_to_velCommand);
+        pre_rc_to_velCommand = rc_to_velCommand;
     }
     
     print_data();
@@ -223,9 +229,14 @@ double sign(double x) {
     return 0.0;
 }
 
+double mapf(int x, double in_min, double in_max, double out_min, double out_max) {
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+
 void reset() {
-    rc_to_velCommand = 0.0;
-    pre_rc_to_velCommand = 0.0;
+    rc_to_velCommand.fill(0.0);
+    pre_rc_to_velCommand.fill(0.0);
     e.fill(0.0);
     e_integral.fill(0.0);
     e_derivative.fill(0.0);
@@ -237,8 +248,8 @@ double low_pass_filter(double new_value, double pre_val){
     return filtered_val;
 }
 
-void get_sensor_data(array<double, 4>& pos, array<double, 4>& last_pos, array<double, 4>& wheel_ang_vel, array<double, 3>& Segway_ang_vel, array<double, 3>& Segway_accel, Orientation& orient){
-    get_vel(pos, last_pos, wheel_ang_vel); // Wheel angular velocity
+void get_sensor_data(array<double, 4>& wheel_pos, array<double, 4>& wheel_last_pos, array<double, 4>& wheel_ang_vel, array<double, 3>& Segway_ang_vel, array<double, 3>& Segway_accel, Orientation& orient){
+    get_vel(wheel_pos, wheel_last_pos, wheel_ang_vel); // Wheel angular velocity
 
     // Segway attitude
     const double* euler = orient.get_euler();
@@ -255,31 +266,49 @@ void get_sensor_data(array<double, 4>& pos, array<double, 4>& last_pos, array<do
     Segway_ang_vel[2] = orient.get_filtered_gyro()[2]; // yaw rate
 }
 
-void get_vel(array<double, 4>& pos, array<double, 4>& last_pos, array<double, 4>& ang_vel) {
+void get_vel(array<double, 4>& wheel_pos, array<double, 4>& wheel_last_pos, array<double, 4>& wheel_ang_vel) {
     for (int j = 0; j < 4; j++) {
-        wheel_ang_vel[j] = (pos[j] - last_pos[j]) * 2.0 * PI / (T * count_perRev);
+        wheel_ang_vel[j] = (wheel_pos[j] - wheel_last_pos[j]) * 2.0 * PI / (T * count_perRev);
         filtered_wheel_ang_vel[j] = low_pass_filter(wheel_ang_vel[j], filtered_wheel_ang_vel[j]);
         wheel_ang_vel_prev[j] = wheel_ang_vel[j];
-        last_pos[j] = pos[j];
+        wheel_last_pos[j] = wheel_pos[j];
     }
 }
 
-double RC_Process_command(uint16_t* rc_values) {
+array<double, 4> RC_Process_command(uint16_t* rc_values) {
     // 處理油門通道 (CH_THROTTLE)
-    if (rc_values[CH_THROTTLE] <= RC_CENTER) {
-        rc_command.throttle = map(rc_values[CH_THROTTLE], RC_MIN, RC_CENTER, MAX_SPEED, 0);
+    // channel 1
+    // if(abs(rc_values[0])<dead_zone){
+    //     rc_command.lateral = 0.0;
+    // }else{
+    //     rc_command.lateral = map(rc_values[0], min_bit, max_bit, -MAX_SPEED, MAX_SPEED);
+    // }
+    if (rc_values[0] <= 1017.0) {
+        rc_command.lateral = mapf(rc_values[0], 200.0, 1017.0, MAX_SPEED, 0.0);
     } else {
-        rc_command.throttle = map(rc_values[CH_THROTTLE], RC_CENTER, RC_MAX, 0, -MAX_SPEED);
+        rc_command.lateral = mapf(rc_values[0], 1017.0, 1800.0, 0.0, -MAX_SPEED);
+    }
+    // channel 2
+    if (rc_values[1] <= 1052.0) {
+        rc_command.pitch = mapf(rc_values[1], 200.0, 1052.0, MAX_SPEED, 0.0);
+    } else {
+        rc_command.pitch = mapf(rc_values[1], 1052.0, 1800.0, 0.0, -MAX_SPEED);
+    }
+    // channel 4
+    if (rc_values[3] <= 980.0) {
+        rc_command.yaw = mapf(rc_values[3], 200.0, 980.0, MAX_SPEED, 0.0);
+    } else {
+        rc_command.yaw = mapf(rc_values[3], 980.0, 1800.0, 0.0, -MAX_SPEED);
     }
     
     if (rc_values[CH_AUX2] < 800) {
-        rc_command.aux2 = 1;
+        rc_command.aux2 = 0;  // lateral, pitch, yaw combined
     }
     else if(rc_values[CH_AUX2] > 1200){
-        rc_command.aux2 = 2;
+        rc_command.aux2 = 2; // lateral, pitch, yaw seperate
     }
     else{
-        rc_command.aux2 = 0;
+        rc_command.aux2 = 1; // nothing mode
     }
 
     if(last_aux2 != rc_command.aux2){
@@ -287,60 +316,68 @@ double RC_Process_command(uint16_t* rc_values) {
         last_aux2 = rc_command.aux2;
     }
 
-    // 處理左右通道 (CH_ROLL)
-    rc_command.roll = map(rc_values[CH_ROLL], 200, 1796, -MAX_PWM, MAX_PWM);
-    
     // 處理模式選擇 (CH_MODE)
     if (rc_values[CH_MODE] < RC_CENTER - 200) {
-        rc_command.mode = 1;  // 模式1
+        rc_command.mode = 0;  // 模式1
     } else if (rc_values[CH_MODE] > RC_CENTER + 200) {
         rc_command.mode = 2;  // 模式2
     } else {
-        rc_command.mode = 0;  // 模式0
+        rc_command.mode = 1;  // 模式0
     }
     
     if(rc_command.aux2 == 2){
         // 根據模式選擇不同的控制策略
         switch (rc_command.mode) {
-            case 0:  // 正常模式
-                rc_to_velCommand = rc_command.throttle;
+            case 0:  // lateral
+                for (int i = 0; i < 4; i++){
+                    rc_to_velCommand[i] = PWM_MAP_MATRIX[i][0] * rc_command.lateral;
+                }
                 break;
                 
-            case 1:  // 精確模式
-                rc_to_velCommand = rc_command.throttle * 0.5;  // 降低速度
+            case 1:  // pitch
+                for (int i = 0; i < 4; i++){
+                    rc_to_velCommand[i] = PWM_MAP_MATRIX[i][1] * rc_command.pitch;  
+                }
                 break;
                 
-            case 2:  // 運動模式
-                rc_to_velCommand = rc_command.throttle * 1.5;  // 提高速度
+            case 2:  // yaw
+                for (int i = 0; i < 4; i++){
+                    rc_to_velCommand[i] = PWM_MAP_MATRIX[i][2] * rc_command.yaw;  
+                }
                 break;
-        }
-        
-        // 應用低通濾波
-        // rc_to_velCommand = rc_filter.update(rc_to_velCommand);
-        filtered_rc_command = low_pass_filter(rc_to_velCommand, filtered_rc_command);
-        
-        // 死區處理
-        if (abs(filtered_rc_command) < 1.0) {
-            filtered_rc_command = 0.0;
         }
     }
     else if(rc_command.aux2 == 1){
-        filtered_rc_command = rc_command.roll;
+        // nothing mode
+        rc_to_velCommand = {0.0, 0.0, 0.0, 0.0};
     }
     else{
-        filtered_rc_command = 0.0;
+        for(int i = 0; i < 4; i++){
+            rc_to_velCommand[i] = PWM_MAP_MATRIX[i][0] * rc_command.lateral + PWM_MAP_MATRIX[i][1] * rc_command.pitch + PWM_MAP_MATRIX[i][2] * rc_command.yaw;
+            // rc_to_velCommand[i]/=3.0;
+        }
+    }
+
+    // 應用低通濾波
+    for(int i = 0; i < 4; i++){
+        filtered_rc_command[i] = low_pass_filter(rc_to_velCommand[i], filtered_rc_command[i]);
+        
+        // 死區處理
+        if (abs(filtered_rc_command[i]) < 2.0) {
+            filtered_rc_command[i] = 0.0;
+        }
     }
     
     return filtered_rc_command;
 }
 
-void PID_controller(double rc_to_velCommand) {
+void PID_controller(array<double, 4>& rc_to_velCommand) {
     for (int j = 0; j < 4; j++) {
         // Calculate error terms
-        e[j] = rc_to_velCommand - filtered_wheel_ang_vel[j];
+        e[j] = rc_to_velCommand[j] - filtered_wheel_ang_vel[j];
         
         // Reset integral when target speed sign changes
-        if (sign(rc_to_velCommand) != sign(pre_rc_to_velCommand)) {
+        if (sign(rc_to_velCommand[j]) != sign(pre_rc_to_velCommand[j])) {
             e_integral[j] = 0;
         }
         
@@ -358,25 +395,20 @@ void PID_controller(double rc_to_velCommand) {
         }
         
         // Calculate motor power with direction
-        motor_power[j] = (KP + KI + KD) * PWM_REVERSE[j];
-        // motor_power[j] = KP + KI + KD;
+        motor_power[j] = KP + KI + KD;
         
         // Update previous error
         e_prev[j] = e[j];
-        if (sign(rc_to_velCommand) != sign(pre_rc_to_velCommand) &&
-            abs(rc_to_velCommand) > 1.0) {
-            e_integral[j] = 0;
-        }
     }
 }
 
-void attitude_init(MPU9250& mpu, imu_data_t& imu_raw, Orientation& orient, double T) {
+void attitude_init() {
     imu_data_t imu_temp;
     int idx = 0;
     SimpleTimer bias_timer;
     bias_timer.begin();
     while (bias_timer.elapsed() < 5000000) { // 5秒累積平均
-        imu_mpu9250_update(mpu, imu_raw.gyro, imu_raw.accel, imu_raw.mag);
+        imu_mpu9250_update(mpu9250, imu_raw.gyro, imu_raw.accel, imu_raw.mag);
         for (int i = 0; i < 3; i++) {
             imu_temp.accel[i] += imu_raw.accel[i];
             imu_temp.gyro[i] += imu_raw.gyro[i];
@@ -390,7 +422,7 @@ void attitude_init(MPU9250& mpu, imu_data_t& imu_raw, Orientation& orient, doubl
         imu_temp.gyro[i] /= (double)(idx);  // 平均陀螺儀
         imu_temp.mag[i] /= (double)(idx);   // 平均磁力計
     }
-    orient.init(T, imu_temp.accel, imu_temp.mag, imu_temp.gyro); // 初始化姿態解算器
+    orient.init(T_AHRS, imu_temp.accel, imu_temp.mag, imu_temp.gyro); // 初始化姿態解算器
 }
 
 
@@ -398,16 +430,48 @@ void print_data(){
     // Serial.print(rc_to_velCommand, 3);
     // Serial.print(" ");
 
-    // for(int i = 0; i < 4; i++){
-    //     Serial.print(ang_vel[i], 3);
-    //     Serial.print(" ");
-    //     Serial.print(filtered_ang_vel[i], 3);
-    //     Serial.print(" ");
-    // }
-    for(int i = 0; i < 3; i++){
-        Serial.print(attitude[i], 3);
+    Serial.print(rc_command.aux2);
+    Serial.print(" ");
+    Serial.print(rc_command.lateral, 3);
+    Serial.print(" ");
+    Serial.print(rc_command.pitch, 3);
+    Serial.print(" ");
+    Serial.print(rc_command.yaw, 3);
+    Serial.print(" ");
+
+    for(int i = 0; i < 4; i++){
+        Serial.print(rc_to_velCommand[i], 3);
+        Serial.print(" ");
+        // Serial.print(motor_power[i]);
+        // Serial.print(" ");
+        // Serial.print(wheel_pos[i], 3);
+        // Serial.print(" ");
+        Serial.print(wheel_ang_vel[i], 3);
+        Serial.print(" ");
+        Serial.print(filtered_wheel_ang_vel[i], 3);
         Serial.print(" ");
     }
+
+    // for(int i = 0; i < 3; i++){
+    //     Serial.print(attitude[i], 3);
+    //     Serial.print(" ");
+    // }
+
+    // for(int i = 0; i < 3; i++){
+    //     Serial.print(imu_raw.accel[i], 3);
+    //     Serial.print(" ");
+    // }
+
+    // for(int i = 0; i < 3; i++){
+    //     Serial.print(imu_raw.gyro[i], 3);
+    //     Serial.print(" ");
+    // }
+
+    // for(int i = 0; i < 3; i++){
+    //     Serial.print(imu_raw.mag[i], 3);
+    //     Serial.print(" ");
+    // }
+  
     Serial.println();
 }
 
