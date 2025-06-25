@@ -12,6 +12,7 @@
 #include <vector>
 #include "../lib/orientation/orientation.hpp"
 #include <simple_timer.hpp>
+#include "cmd_prefilter.hpp"
 
 using namespace std;
 
@@ -52,8 +53,8 @@ SimpleTimer ahrs_timer, serial_timer;
 // ===== RC Input Configuration =====
 const uint16_t RC_MIN = 200;                               // Minimum RC input value
 const uint16_t RC_MAX = 1800;                              // Maximum RC input value
-const uint16_t RC_CENTER = 1046;                           // Center RC input value
-const double MAX_MOTOR_SPEED = 30.0;                             // Maximum speed in rad/s
+const uint16_t RC_CENTER = 1000;                           // Center RC input value
+const double MAX_MOTOR_SPEED = 20.0;                             // Maximum speed in rad/s
 const double MAX_PITCH = 10.0;                             // Maximum pitch in rad/s
 
 // ===== Control Loop Configuration =====
@@ -79,20 +80,21 @@ array<double, 3> Segway_ang_vel = {0.0, 0.0, 0.0}; // Segway_ang_vel[0]=roll rat
 array<double, 3> Segway_accel = {0.0, 0.0, 0.0}; // Segway_accel[0]=x acc, [1]=y acc, [2]=z acc
 
 // ===== Segway PID Configuration =====
-const array<double, 3> SEG_Kp = {0.0, 0.0, 0.0};  // Proportional gains
-const array<double, 3> SEG_Ki = {0.0, 0.0, 0.0};      // Integral gains
-const array<double, 3> SEG_Kd = {0.0, 0.0, 0.0};          // Derivative gains
-array<double, 3> SEG_ATTITUDE_ERROR = {0.0, 0.0, 0.0};
-array<double, 3> SEG_ATTITUDE_ERROR_INTEGRAL = {0.0, 0.0, 0.0};
-array<double, 3> SEG_ATTITUDE_ERROR_DERIVATIVE = {0.0, 0.0, 0.0};
-array<double, 3> SEG_ATTITUDE_ERROR_PREV = {0.0, 0.0, 0.0};
-array<double, 3> SEGWAY_CONTROL_LAW = {0.0, 0.0, 0.0};
+const double SEG_PITCH_Kp = -2.5;
+const double SEG_PITCH_Ki = -2.0;      // Integral gains
+const double SEG_PITCH_Kd = -2.0;          // Derivative gains
+double SEG_PITCH_ERROR = 0.0;
+double SEG_PITCH_ERROR_INTEGRAL = 0.0;
+double SEG_PITCH_ERROR_DERIVATIVE = 0.0;
+double SEG_PITCH_ERROR_PREV = 0.0;
+array<double, 3> SEG_CONTROL_LAW = {0.0, 0.0, 0.0};
 
 // ===== Global Objects =====
 MPU9250 mpu9250(Wire, 0x68);
 MotorController motorController(PIN_DIR, PIN_PWM, PWM_REVERSE, CONFIG_ANALOG_WRITE_RES);
 LS7366R qei;
 IEC::SBUS sbus(HW_SERIAL_INTERFACE_SBUS);
+cmd_prefilter CMD1;
 
 // ===== Global Variables =====
 // RC for motor Control
@@ -103,9 +105,13 @@ array<double, 4> filtered_wheel_command = {0.0, 0.0, 0.0, 0.0};
 static int last_aux2 = -1; // 初始狀態為 -1 表示第一次執行
 
 // RC for Segway Control
-array<double, 3> SEG_ATTITUDE_COMMAND = {0.0, 0.0, 0.0};
-array<double, 3> PRE_SEG_ATTITUDE_COMMAND = {0.0, 0.0, 0.0};
-array<double, 3> FILTERED_SEG_ATTITUDE_COMMAND = {0.0, 0.0, 0.0};
+double SEG_PITCH_COMMAND = 0.0;
+double PRE_SEG_PITCH_COMMAND = 0.0;
+double FILTERED_SEG_PITCH_COMMAND = 0.0;
+double SEG_PITCH_RATE_COMMAND = 0.0;
+// array<double, 3> SEG_ATTITUDE_COMMAND = {0.0, 0.0, 0.0};
+// array<double, 3> PRE_SEG_ATTITUDE_COMMAND = {0.0, 0.0, 0.0};
+// array<double, 3> FILTERED_SEG_ATTITUDE_COMMAND = {0.0, 0.0, 0.0};
 
 // Motor Control
 std::array<double, 4> motor_power = {0.0, 0.0, 0.0, 0.0};
@@ -163,7 +169,7 @@ double low_pass_filter(double new_value, double pre_val);
 void get_vel(array<double, 4>& wheel_pos, array<double, 4>& wheel_last_pos, array<double, 4>& wheel_ang_vel);
 void RC_Process_command(uint16_t* rc_values);
 void motor_controller(array<double, 4>& wheel_command);
-void Segway_controller(array<double, 3>& SEG_ATTITUDE_COMMAND);
+void Segway_controller(double SEG_PITCH_COMMAND);
 void print_data();
 void routine();
 void attitude_init();
@@ -225,7 +231,8 @@ void routine() {
     if (rc_command.aux2 == 2) {  // 使用 aux2 作為啟動開關
         switch (rc_command.mode) {
             case 0:  // attitude control
-                Segway_controller(SEG_ATTITUDE_COMMAND);
+                Segway_controller(SEG_PITCH_COMMAND);
+                PRE_SEG_PITCH_COMMAND = FILTERED_SEG_PITCH_COMMAND;
                 motor_controller(filtered_wheel_command);
                 pre_wheel_command = filtered_wheel_command;
                 break;
@@ -277,9 +284,15 @@ void reset() {
     filtered_wheel_command.fill(0.0);
     pre_wheel_command.fill(0.0);
     wheel_command.fill(0.0);
-    SEG_ATTITUDE_COMMAND.fill(0.0);
-    PRE_SEG_ATTITUDE_COMMAND.fill(0.0);
-    FILTERED_SEG_ATTITUDE_COMMAND.fill(0.0);
+    SEG_PITCH_COMMAND = 0.0;
+    PRE_SEG_PITCH_COMMAND = 0.0;
+    SEG_PITCH_RATE_COMMAND = 0.0;
+    FILTERED_SEG_PITCH_COMMAND = 0.0;
+    SEG_PITCH_ERROR = 0.0;
+    SEG_PITCH_ERROR_INTEGRAL = 0.0;
+    SEG_PITCH_ERROR_DERIVATIVE = 0.0;
+    SEG_PITCH_ERROR_PREV = 0.0;
+    SEG_CONTROL_LAW.fill(0.0);
     e.fill(0.0);
     e_integral.fill(0.0);
     e_derivative.fill(0.0);
@@ -411,37 +424,56 @@ void RC_Process_command(uint16_t* rc_values) {
         switch (rc_command.mode) {
             case 0: // Segway attitude
                 // Use pitch for attitude
-                if (abs(rc_values[1] - 1017.0) <= 0.0) {
+                if (abs(rc_values[1] - 1046.0) <= 10.0) {
                     rc_command.pitch = 0.0;
                 } else {
                     rc_command.pitch = mapf(rc_values[1], 200.0, 1800.0, MAX_PITCH, -MAX_PITCH);
                 }
-                SEG_ATTITUDE_COMMAND[1] = rc_command.pitch;
+                SEG_PITCH_COMMAND = rc_command.pitch;
                 break;
             case 1: // Segway speed
                 break;
             case 2: // Segway position
                 break;
         }
-        for(int i = 0; i < 3; i++){
-            FILTERED_SEG_ATTITUDE_COMMAND[i] = low_pass_filter(SEG_ATTITUDE_COMMAND[i], FILTERED_SEG_ATTITUDE_COMMAND[i]);
-        }
+        FILTERED_SEG_PITCH_COMMAND = low_pass_filter(SEG_PITCH_COMMAND, FILTERED_SEG_PITCH_COMMAND);
+        SEG_PITCH_RATE_COMMAND = (FILTERED_SEG_PITCH_COMMAND - PRE_SEG_PITCH_COMMAND) / T;
     }
 }
 
-void Segway_controller(array<double, 3>& SEG_ATTITUDE_COMMAND){
-    for(int i = 0; i < 3; i++){
-        SEG_ATTITUDE_ERROR[i] = SEG_ATTITUDE_COMMAND[i] - attitude[i];
-        SEG_ATTITUDE_ERROR_INTEGRAL[i] += SEG_ATTITUDE_ERROR[i] * T;
-        SEG_ATTITUDE_ERROR_DERIVATIVE[i] = (SEG_ATTITUDE_ERROR[i] - SEG_ATTITUDE_ERROR_PREV[i]) / T;
-        SEG_ATTITUDE_ERROR_PREV[i] = SEG_ATTITUDE_ERROR[i];
-        SEGWAY_CONTROL_LAW[i] = SEG_Kp[i] * SEG_ATTITUDE_ERROR[i] + SEG_Ki[i] * SEG_ATTITUDE_ERROR_INTEGRAL[i] + SEG_Kd[i] * SEG_ATTITUDE_ERROR_DERIVATIVE[i];
+void Segway_controller(double FILTERED_SEG_PITCH_COMMAND){
+    double pitch = attitude[1];
+    if(abs(pitch) <= 1.0){
+        pitch = 0.0;
+    }
+    SEG_PITCH_ERROR = FILTERED_SEG_PITCH_COMMAND - pitch;
+    
+    if(sign(FILTERED_SEG_PITCH_COMMAND) != sign(PRE_SEG_PITCH_COMMAND)){
+        SEG_PITCH_ERROR_INTEGRAL = 0.0;
     }
 
+    SEG_PITCH_ERROR_INTEGRAL += SEG_PITCH_ERROR * T;
+    // SEG_PITCH_ERROR_DERIVATIVE = (SEG_PITCH_ERROR - SEG_PITCH_ERROR_PREV) / T;
+    SEG_PITCH_ERROR_DERIVATIVE = SEG_PITCH_RATE_COMMAND - Segway_ang_vel[1];
+    
+    double KP = SEG_PITCH_Kp * SEG_PITCH_ERROR;
+    double KI = SEG_PITCH_Ki * SEG_PITCH_ERROR_INTEGRAL;
+    double KD = SEG_PITCH_Kd * SEG_PITCH_ERROR_DERIVATIVE;
+
+    if(abs(KI) >= 0.8 * MAX_MOTOR_SPEED){
+        KI = 0.8 * MAX_MOTOR_SPEED * sign(KI);
+    }
+
+    SEG_CONTROL_LAW[1] = KP + KI + KD;
+    if(abs(SEG_CONTROL_LAW[1]) >= 30.0){
+        SEG_CONTROL_LAW[1] = 30.0 * sign(SEG_CONTROL_LAW[1]);
+    }
+    SEG_PITCH_ERROR_PREV = SEG_PITCH_ERROR;
+
     for(int i = 0; i < 4; i++){
-        wheel_command[i] = (PWM_MAP_MATRIX[i][0] * SEGWAY_CONTROL_LAW[0] +
-                            PWM_MAP_MATRIX[i][1] * SEGWAY_CONTROL_LAW[1] +
-                            PWM_MAP_MATRIX[i][2] * SEGWAY_CONTROL_LAW[2]);
+        wheel_command[i] = (PWM_MAP_MATRIX[i][0] * SEG_CONTROL_LAW[0] +
+                            PWM_MAP_MATRIX[i][1] * SEG_CONTROL_LAW[1] +
+                            PWM_MAP_MATRIX[i][2] * SEG_CONTROL_LAW[2]);
 
         filtered_wheel_command[i] = low_pass_filter(wheel_command[i], filtered_wheel_command[i]);
         // // 死區處理
@@ -458,7 +490,7 @@ void motor_controller(array<double, 4>& filtered_wheel_command) {
         
         // Reset integral when target speed sign changes
         if (sign(filtered_wheel_command[j]) != sign(pre_wheel_command[j])) {
-            e_integral[j] = 0;
+            e_integral[j] = 0.0;
         }
         
         e_integral[j] += e[j] * T;
@@ -508,47 +540,38 @@ void attitude_init() {
 
 void print_data(){
 
-    Serial.print(rc_command.aux2);
+    // Serial.print(rc_command.aux2);
+    // Serial.print(" ");
+    // Serial.print(rc_command.lateral, 3);
+    // Serial.print(" ");
+    // Serial.print(rc_command.pitch, 3);
+    // Serial.print(" ");
+    // Serial.print(rc_command.yaw, 3);
+    // Serial.print(" ");
+    Serial.print(SEG_PITCH_ERROR);
     Serial.print(" ");
-    Serial.print(rc_command.lateral, 3);
+    Serial.print(SEG_PITCH_ERROR_INTEGRAL);
     Serial.print(" ");
-    Serial.print(rc_command.pitch, 3);
-    Serial.print(" ");
-    Serial.print(rc_command.yaw, 3);
+    Serial.print(SEG_PITCH_ERROR_DERIVATIVE);
     Serial.print(" ");
 
+    for(int i = 0; i < 3; i++){
+        Serial.print(SEG_CONTROL_LAW[i]);
+        Serial.print(" ");
+    }
+
     for(int i = 0; i < 4; i++){
-        Serial.print(wheel_command[i], 3);
+        Serial.print(filtered_wheel_command[i], 3);
         Serial.print(" ");
         // Serial.print(motor_power[i]);
         // Serial.print(" ");
         // Serial.print(wheel_pos[i], 3);
         // Serial.print(" ");
-        Serial.print(wheel_ang_vel[i], 3);
-        Serial.print(" ");
-        Serial.print(filtered_wheel_ang_vel[i], 3);
-        Serial.print(" ");
+        // Serial.print(wheel_ang_vel[i], 3);
+        // Serial.print(" ");
+        // Serial.print(filtered_wheel_ang_vel[i], 3);
+        // Serial.print(" ");
     }
-
-    // for(int i = 0; i < 3; i++){
-    //     Serial.print(attitude[i], 3);
-    //     Serial.print(" ");
-    // }
-
-    // for(int i = 0; i < 3; i++){
-    //     Serial.print(imu_raw.accel[i], 3);
-    //     Serial.print(" ");
-    // }
-
-    // for(int i = 0; i < 3; i++){
-    //     Serial.print(imu_raw.gyro[i], 3);
-    //     Serial.print(" ");
-    // }
-
-    // for(int i = 0; i < 3; i++){
-    //     Serial.print(imu_raw.mag[i], 3);
-    //     Serial.print(" ");
-    // }
   
     Serial.println();
 }
