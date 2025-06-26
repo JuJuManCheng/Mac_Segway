@@ -18,9 +18,11 @@ using namespace std;
 
 // Hardware interface definitions
 #define HW_SERIAL_INTERFACE_SBUS Serial1
-
 #define voltage_pin A3
+#define AHRS_UPDATE_PERIOD_MICROS 1250 // 姿態解算更新週期（微秒）
+
 double voltage = 0.0;
+
 // ===== Pin Configurations =====
 const array<uint8_t, 4> PIN_DIR = {15, 14, 6, 28};    // Direction pins
 const array<uint8_t, 4> PIN_PWM = {25, 24, 9, 29};    // PWM pins
@@ -38,17 +40,8 @@ const array<uint8_t, 4> PIN_QEI = {30, 31, 33, 32};   // Quadrature encoder pins
 const int CONFIG_ANALOG_WRITE_FREQ = 30000;                // PWM frequency in Hz
 const int CONFIG_ANALOG_WRITE_RES = 12;                    // PWM resolution in bits
 const int MAX_PWM = (int)(pow(2, CONFIG_ANALOG_WRITE_RES)) - 1;  // Maximum PWM value
-
-// ===== Madgwick AHRS & Orientation Integration =====
-#define AHRS_UPDATE_PERIOD_MICROS 1250 // 姿態解算更新週期（微秒）
-double T_AHRS  = (double)(AHRS_UPDATE_PERIOD_MICROS) / 1000000.0;
-Orientation orient; // 姿態解算物件
-imu_data_t imu_raw; // 原始IMU資料結構
-vector<float> orientation_buffer; // 暫存姿態資料用
-
-// ===== SimpleTimer 物件宣告 =====
-SimpleTimer ahrs_timer, serial_timer;
-
+// ===== Encoder Configuration =====
+const double count_perRev = 1400.0;                        // Encoder counts per revolution
 
 // ===== RC Input Configuration =====
 const uint16_t RC_MIN = 200;                               // Minimum RC input value
@@ -67,14 +60,6 @@ const double vel_fc = 60;
 const double VEL_FILTER_TAU = 1 / (2*PI*vel_fc);             // time constant for RC filtering
 const double VEL_FILTER_Alpha = exp(-T / VEL_FILTER_TAU);    // Filter coefficient
 
-// ===== Encoder Configuration =====
-const double count_perRev = 1400.0;                        // Encoder counts per revolution
-
-// ===== MotorPID Configuration =====
-const array<double, 4> MOTOR_Kp = {300.0, 300.0, 300.0, 300.0};  // Proportional gains
-const array<double, 4> MOTOR_Ki = {1000.0, 1000.0, 1000.0, 1000.0};      // Integral gains
-const array<double, 4> MOTOR_Kd = {0.0, 0.0, 0.0, 0.0};          // Derivative gains
-
 // RC for Segway Control
 double SEG_PITCH_COMMAND = 0.0;
 double PRE_SEG_PITCH_COMMAND = 0.0;
@@ -88,6 +73,13 @@ double FILTERED_SEG_PITCH_RATE_COMMAND = 0.0;
 array<double, 3> attitude = {0.0, 0.0, 0.0}; // attitude[0]=roll, [1]=pitch, [2]=yaw
 array<double, 3> Segway_ang_vel = {0.0, 0.0, 0.0}; // Segway_ang_vel[0]=roll rate, [1]=pitch rate, [2]=yaw rate
 array<double, 3> Segway_accel = {0.0, 0.0, 0.0}; // Segway_accel[0]=x acc, [1]=y acc, [2]=z acc
+
+// Encoder Data
+array<double, 4> wheel_pos = {0.0, 0.0, 0.0, 0.0};
+array<double, 4> wheel_last_pos = {0.0, 0.0, 0.0, 0.0};
+array<double, 4> wheel_ang_vel = {0.0, 0.0, 0.0, 0.0};
+array<double, 4> wheel_ang_vel_prev = {0.0, 0.0, 0.0, 0.0};
+array<double, 4> filtered_wheel_ang_vel = {0.0, 0.0, 0.0, 0.0};
 
 // ===== Segway PID Configuration =====
 const double SEG_PITCH_RATE_Kp = -4.5;
@@ -112,14 +104,6 @@ double PRE_SEG_PITCH_TO_PITCH_RATE_CMD = 0.0;
 
 array<double, 3> SEG_CONTROL_LAW = {0.0, 0.0, 0.0};
 
-// ===== Global Objects =====
-MPU9250 mpu9250(Wire, 0x68);
-MotorController motorController(PIN_DIR, PIN_PWM, PWM_REVERSE, CONFIG_ANALOG_WRITE_RES);
-LS7366R qei;
-IEC::SBUS sbus(HW_SERIAL_INTERFACE_SBUS);
-cmd_prefilter CMD1;
-
-// ===== Global Variables =====
 // RC for motor Control
 uint16_t rc[16] = {0};
 array<double, 4> wheel_command = {0.0, 0.0, 0.0, 0.0};
@@ -130,21 +114,16 @@ static int last_aux2 = -1; // 初始狀態為 -1 表示第一次執行
 // Motor Control
 std::array<double, 4> motor_power = {0.0, 0.0, 0.0, 0.0};
 
-// Encoder Data
-array<double, 4> wheel_pos = {0.0, 0.0, 0.0, 0.0};
-array<double, 4> wheel_last_pos = {0.0, 0.0, 0.0, 0.0};
-array<double, 4> wheel_ang_vel = {0.0, 0.0, 0.0, 0.0};
-array<double, 4> wheel_ang_vel_prev = {0.0, 0.0, 0.0, 0.0};
-array<double, 4> filtered_wheel_ang_vel = {0.0, 0.0, 0.0, 0.0};
+// ===== Motor PID Configuration =====
+const array<double, 4> MOTOR_Kp = {300.0, 300.0, 300.0, 300.0};  // Proportional gains
+const array<double, 4> MOTOR_Ki = {1000.0, 1000.0, 1000.0, 1000.0};      // Integral gains
+const array<double, 4> MOTOR_Kd = {0.0, 0.0, 0.0, 0.0};          // Derivative gains
 
 // Motor PID Variables
 array<double, 4> e = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> e_integral = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> e_derivative = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> e_prev = {0.0, 0.0, 0.0, 0.0};
-
-// Timer and Debug
-IntervalTimer timer;
 
 // RC channel mapping
 enum RC_CHANNEL {
@@ -170,24 +149,47 @@ struct RC_Command {
     bool aux3;         // 輔助開關3狀態
 };
 
+// ===== Global Objects =====
+MPU9250 mpu9250(Wire, 0x68);
+MotorController motorController(PIN_DIR, PIN_PWM, PWM_REVERSE, CONFIG_ANALOG_WRITE_RES);
+LS7366R qei;
+IEC::SBUS sbus(HW_SERIAL_INTERFACE_SBUS);
+cmd_prefilter CMD1;
+IntervalTimer timer;
 RC_Command rc_command;
+// ===== SimpleTimer 物件宣告 =====
+SimpleTimer ahrs_timer, serial_timer;
+// ===== Madgwick AHRS & Orientation Integration =====
+double T_AHRS  = (double)(AHRS_UPDATE_PERIOD_MICROS) / 1000000.0;
+Orientation orient; // 姿態解算物件
+imu_data_t imu_raw; // 原始IMU資料結構
+vector<float> orientation_buffer; // 暫存姿態資料用
+int elapTime = 0;
 
 // ===== Helper Functions =====
+// Utility Functions
 double sign(double x);
 double mapf(int x, double in_min, double in_max, double out_min, double out_max);
-void reset();
 double low_pass_filter(double new_value, double pre_val);
-void get_vel(array<double, 4>& wheel_pos, array<double, 4>& wheel_last_pos, array<double, 4>& wheel_ang_vel);
-void RC_Process_command(uint16_t* rc_values);
+
+// Control Functions
+void reset();
 void motor_controller(array<double, 4>& filtered_wheel_command);
 void Segway_Pitch_Rate_controller(double FILTERED_SEG_PITCH_RATE_COMMAND);
 void Segway_Pitch_controller(double FILTERED_SEG_PITCH_COMMAND);
-void print_data();
-void routine();
-void attitude_init();
+
+// Sensor & Data Processing Functions
+void get_vel(array<double, 4>& wheel_pos, array<double, 4>& wheel_last_pos, array<double, 4>& wheel_ang_vel);
 void get_sensor_data(array<double, 4>& wheel_pos, array<double, 4>& wheel_last_pos, array<double, 4>& wheel_ang_vel, array<double, 3>& Segway_ang_vel, array<double, 3>& Segway_accel, Orientation& orient);
 
-int elapTime = 0;
+// RC & Input Functions
+void RC_Process_command(uint16_t* rc_values);
+
+// System & Initialization Functions
+void attitude_init();
+void routine();
+void print_data();
+
 // ===== Setup and Loop =====
 void setup() {
     Serial.begin(115200);               // 初始化序列埠
