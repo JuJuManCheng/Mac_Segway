@@ -61,7 +61,7 @@ public:
     {
         // Set IMU filter parameters
         double fc_accel = 100.0;
-        double fc_gyro = 100.0;
+        double fc_gyro = 30.0;
         double fc_mag = 100.0;
 
         // Initialize IMU LPFs

@@ -54,8 +54,9 @@ SimpleTimer ahrs_timer, serial_timer;
 const uint16_t RC_MIN = 200;                               // Minimum RC input value
 const uint16_t RC_MAX = 1800;                              // Maximum RC input value
 const uint16_t RC_CENTER = 1000;                           // Center RC input value
-const double MAX_MOTOR_SPEED = 20.0;                             // Maximum speed in rad/s
+const double MAX_MOTOR_SPEED = 30.0;                             // Maximum speed in rad/s
 const double MAX_PITCH = 10.0;                             // Maximum pitch in rad/s
+const double MAX_PITCH_RATE = 3.0; // rad/s
 
 // ===== Control Loop Configuration =====
 const double T = 0.005;                                      
@@ -74,19 +75,41 @@ const array<double, 4> MOTOR_Kp = {300.0, 300.0, 300.0, 300.0};  // Proportional
 const array<double, 4> MOTOR_Ki = {1000.0, 1000.0, 1000.0, 1000.0};      // Integral gains
 const array<double, 4> MOTOR_Kd = {0.0, 0.0, 0.0, 0.0};          // Derivative gains
 
+// RC for Segway Control
+double SEG_PITCH_COMMAND = 0.0;
+double PRE_SEG_PITCH_COMMAND = 0.0;
+double FILTERED_SEG_PITCH_COMMAND = 0.0;
+
+double SEG_PITCH_RATE_COMMAND = 0.0;
+double PRE_SEG_PITCH_RATE_COMMAND = 0.0;
+double FILTERED_SEG_PITCH_RATE_COMMAND = 0.0;
+
 // ===== Attitude =====
 array<double, 3> attitude = {0.0, 0.0, 0.0}; // attitude[0]=roll, [1]=pitch, [2]=yaw
 array<double, 3> Segway_ang_vel = {0.0, 0.0, 0.0}; // Segway_ang_vel[0]=roll rate, [1]=pitch rate, [2]=yaw rate
 array<double, 3> Segway_accel = {0.0, 0.0, 0.0}; // Segway_accel[0]=x acc, [1]=y acc, [2]=z acc
 
 // ===== Segway PID Configuration =====
-const double SEG_PITCH_Kp = -2.5;
-const double SEG_PITCH_Ki = -2.0;      // Integral gains
-const double SEG_PITCH_Kd = -2.0;          // Derivative gains
+const double SEG_PITCH_RATE_Kp = -4.5;
+const double SEG_PITCH_RATE_Ki = -1.0;      // Integral gains
+const double SEG_PITCH_RATE_Kd = 0.0;
+double SEG_PITCH_RATE_ERROR = 0.0;
+double SEG_PITCH_RATE_ERROR_INTEGRAL = 0.0;
+double SEG_PITCH_RATE_ERROR_DERIVATIVE = 0.0;
+double SEG_PITCH_RATE_ERROR_PREV = 0.0;
+
+const double SEG_PITCH_Kp = 40.0;
+const double SEG_PITCH_Ki = 2.0;      // Integral gains
+const double SEG_PITCH_Kd = 0.0;          // Derivative gains
 double SEG_PITCH_ERROR = 0.0;
 double SEG_PITCH_ERROR_INTEGRAL = 0.0;
 double SEG_PITCH_ERROR_DERIVATIVE = 0.0;
 double SEG_PITCH_ERROR_PREV = 0.0;
+
+double SEG_PITCH_TO_PITCH_RATE_CMD = 0.0;
+double FILTERED_SEG_PITCH_TO_PITCH_RATE_CMD = 0.0;
+double PRE_SEG_PITCH_TO_PITCH_RATE_CMD = 0.0;
+
 array<double, 3> SEG_CONTROL_LAW = {0.0, 0.0, 0.0};
 
 // ===== Global Objects =====
@@ -104,15 +127,6 @@ array<double, 4> pre_wheel_command = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> filtered_wheel_command = {0.0, 0.0, 0.0, 0.0};
 static int last_aux2 = -1; // 初始狀態為 -1 表示第一次執行
 
-// RC for Segway Control
-double SEG_PITCH_COMMAND = 0.0;
-double PRE_SEG_PITCH_COMMAND = 0.0;
-double FILTERED_SEG_PITCH_COMMAND = 0.0;
-double SEG_PITCH_RATE_COMMAND = 0.0;
-// array<double, 3> SEG_ATTITUDE_COMMAND = {0.0, 0.0, 0.0};
-// array<double, 3> PRE_SEG_ATTITUDE_COMMAND = {0.0, 0.0, 0.0};
-// array<double, 3> FILTERED_SEG_ATTITUDE_COMMAND = {0.0, 0.0, 0.0};
-
 // Motor Control
 std::array<double, 4> motor_power = {0.0, 0.0, 0.0, 0.0};
 
@@ -123,7 +137,7 @@ array<double, 4> wheel_ang_vel = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> wheel_ang_vel_prev = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> filtered_wheel_ang_vel = {0.0, 0.0, 0.0, 0.0};
 
-// PID Variables
+// Motor PID Variables
 array<double, 4> e = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> e_integral = {0.0, 0.0, 0.0, 0.0};
 array<double, 4> e_derivative = {0.0, 0.0, 0.0, 0.0};
@@ -131,9 +145,6 @@ array<double, 4> e_prev = {0.0, 0.0, 0.0, 0.0};
 
 // Timer and Debug
 IntervalTimer timer;
-volatile unsigned long interruptCount = 0.0;
-unsigned long last_print_time = 0.0;
-const unsigned long PRINT_INTERVAL = 100.0;
 
 // RC channel mapping
 enum RC_CHANNEL {
@@ -168,8 +179,9 @@ void reset();
 double low_pass_filter(double new_value, double pre_val);
 void get_vel(array<double, 4>& wheel_pos, array<double, 4>& wheel_last_pos, array<double, 4>& wheel_ang_vel);
 void RC_Process_command(uint16_t* rc_values);
-void motor_controller(array<double, 4>& wheel_command);
-void Segway_controller(double SEG_PITCH_COMMAND);
+void motor_controller(array<double, 4>& filtered_wheel_command);
+void Segway_Pitch_Rate_controller(double FILTERED_SEG_PITCH_RATE_COMMAND);
+void Segway_Pitch_controller(double FILTERED_SEG_PITCH_COMMAND);
 void print_data();
 void routine();
 void attitude_init();
@@ -186,15 +198,14 @@ void setup() {
     analogReadResolution(12);           // 設定類比讀取解析度為12位元
     motorController.init();             // 初始化馬達控制器
     motorController.stopAll();          // 停止所有馬達
-    reset();                            // 重設控制變數
     timer.begin(routine, T*1000000);    
-    Serial.println("System initialized!");
-    Serial.println("Direction configuration:");
-    delay(3000);
-
     // ===== 姿態解算初始化 =====
     attitude_init();
     ahrs_timer.begin();
+    reset();                            // 重設控制變數
+    Serial.println("System initialized!");
+    Serial.println("Direction configuration:");
+    delay(1000);
 }
 
 void loop() {
@@ -230,14 +241,19 @@ void routine() {
 
     if (rc_command.aux2 == 2) {  // 使用 aux2 作為啟動開關
         switch (rc_command.mode) {
-            case 0:  // attitude control
-                Segway_controller(SEG_PITCH_COMMAND);
-                PRE_SEG_PITCH_COMMAND = FILTERED_SEG_PITCH_COMMAND;
+            case 0:  // PITCH RATE CONTROL
+                Segway_Pitch_Rate_controller(FILTERED_SEG_PITCH_RATE_COMMAND);
+                PRE_SEG_PITCH_RATE_COMMAND = FILTERED_SEG_PITCH_RATE_COMMAND;
                 motor_controller(filtered_wheel_command);
                 pre_wheel_command = filtered_wheel_command;
                 break;
-            case 1:  // speed control
-                
+            case 1:  // ATTITUDE CONTROL (PITCH)
+                Segway_Pitch_controller(FILTERED_SEG_PITCH_COMMAND);
+                PRE_SEG_PITCH_COMMAND = FILTERED_SEG_PITCH_COMMAND;
+                Segway_Pitch_Rate_controller(FILTERED_SEG_PITCH_TO_PITCH_RATE_CMD);
+                PRE_SEG_PITCH_RATE_COMMAND = FILTERED_SEG_PITCH_TO_PITCH_RATE_CMD;
+                motor_controller(filtered_wheel_command);
+                pre_wheel_command = filtered_wheel_command;
                 break;
             case 2:  // position control
                 
@@ -284,15 +300,30 @@ void reset() {
     filtered_wheel_command.fill(0.0);
     pre_wheel_command.fill(0.0);
     wheel_command.fill(0.0);
+
+    SEG_PITCH_RATE_COMMAND = 0.0;
+    PRE_SEG_PITCH_RATE_COMMAND = 0.0;
+    FILTERED_SEG_PITCH_RATE_COMMAND = 0.0;
+
+    SEG_PITCH_RATE_ERROR = 0.0;
+    SEG_PITCH_RATE_ERROR_INTEGRAL = 0.0;
+    SEG_PITCH_RATE_ERROR_DERIVATIVE = 0.0;
+    SEG_PITCH_RATE_ERROR_PREV = 0.0;
+
     SEG_PITCH_COMMAND = 0.0;
     PRE_SEG_PITCH_COMMAND = 0.0;
-    SEG_PITCH_RATE_COMMAND = 0.0;
     FILTERED_SEG_PITCH_COMMAND = 0.0;
+
+    SEG_PITCH_TO_PITCH_RATE_CMD = 0.0;
+    FILTERED_SEG_PITCH_TO_PITCH_RATE_CMD = 0.0;
+
     SEG_PITCH_ERROR = 0.0;
     SEG_PITCH_ERROR_INTEGRAL = 0.0;
     SEG_PITCH_ERROR_DERIVATIVE = 0.0;
     SEG_PITCH_ERROR_PREV = 0.0;
+
     SEG_CONTROL_LAW.fill(0.0);
+
     e.fill(0.0);
     e_integral.fill(0.0);
     e_derivative.fill(0.0);
@@ -373,21 +404,6 @@ void RC_Process_command(uint16_t* rc_values) {
         }
         rc_command.yaw = mapf(rc_values[2], 200.0, 1800.0, 0.0, MAX_MOTOR_SPEED);
 
-        // if (rc_values[0] <= 1017.0) {
-        //         rc_command.lateral = mapf(rc_values[0], 200.0, 1017.0, MAX_MOTOR_SPEED, 0.0);
-        //     } else {
-        //         rc_command.lateral = mapf(rc_values[0], 1017.0, 1800.0, 0.0, -MAX_MOTOR_SPEED);
-        //     }
-        //     if (rc_values[1] <= 1052.0) {
-        //         rc_command.pitch = mapf(rc_values[1], 200.0, 1052.0, MAX_MOTOR_SPEED, 0.0);
-        //     } else {
-        //         rc_command.pitch = mapf(rc_values[1], 1052.0, 1800.0, 0.0, -MAX_MOTOR_SPEED);
-        //     }
-        //     if (rc_values[3] <= 980.0) {
-        //         rc_command.yaw = mapf(rc_values[3], 200.0, 980.0, MAX_MOTOR_SPEED, 0.0);
-        //     } else {
-        //         rc_command.yaw = mapf(rc_values[3], 980.0, 1800.0, 0.0, -MAX_MOTOR_SPEED);
-        //     }
         // aux2=0: normal 3 modes
         switch (rc_command.mode) {
             case 0: // attitude control
@@ -422,7 +438,16 @@ void RC_Process_command(uint16_t* rc_values) {
     } else if (rc_command.aux2 == 2) {
         // aux2=2: Segway control, 3 modes
         switch (rc_command.mode) {
-            case 0: // Segway attitude
+            case 0: // Segway speed
+                if (abs(rc_values[1] - 1046.0) <= 10.0) {
+                    rc_command.pitch = 0.0;
+                } else {
+                    rc_command.pitch = mapf(rc_values[1], 200.0, 1800.0, MAX_PITCH_RATE, -MAX_PITCH_RATE);
+                }
+                SEG_PITCH_RATE_COMMAND = rc_command.pitch;
+                FILTERED_SEG_PITCH_RATE_COMMAND = low_pass_filter(SEG_PITCH_RATE_COMMAND, FILTERED_SEG_PITCH_RATE_COMMAND);
+                break;
+            case 1: // Segway attitude
                 // Use pitch for attitude
                 if (abs(rc_values[1] - 1046.0) <= 10.0) {
                     rc_command.pitch = 0.0;
@@ -430,45 +455,39 @@ void RC_Process_command(uint16_t* rc_values) {
                     rc_command.pitch = mapf(rc_values[1], 200.0, 1800.0, MAX_PITCH, -MAX_PITCH);
                 }
                 SEG_PITCH_COMMAND = rc_command.pitch;
-                break;
-            case 1: // Segway speed
+                FILTERED_SEG_PITCH_COMMAND = low_pass_filter(SEG_PITCH_COMMAND, FILTERED_SEG_PITCH_COMMAND);
                 break;
             case 2: // Segway position
                 break;
         }
-        FILTERED_SEG_PITCH_COMMAND = low_pass_filter(SEG_PITCH_COMMAND, FILTERED_SEG_PITCH_COMMAND);
-        SEG_PITCH_RATE_COMMAND = (FILTERED_SEG_PITCH_COMMAND - PRE_SEG_PITCH_COMMAND) / T;
     }
 }
 
-void Segway_controller(double FILTERED_SEG_PITCH_COMMAND){
-    double pitch = attitude[1];
-    if(abs(pitch) <= 1.0){
-        pitch = 0.0;
-    }
-    SEG_PITCH_ERROR = FILTERED_SEG_PITCH_COMMAND - pitch;
+void Segway_Pitch_Rate_controller(double FILTERED_SEG_PITCH_RATE_COMMAND){
+    double pitch_rate = Segway_ang_vel[1];
     
-    if(sign(FILTERED_SEG_PITCH_COMMAND) != sign(PRE_SEG_PITCH_COMMAND)){
-        SEG_PITCH_ERROR_INTEGRAL = 0.0;
+    SEG_PITCH_RATE_ERROR = FILTERED_SEG_PITCH_RATE_COMMAND - pitch_rate;
+    
+    if(sign(FILTERED_SEG_PITCH_RATE_COMMAND) != sign(PRE_SEG_PITCH_RATE_COMMAND)){
+        SEG_PITCH_RATE_ERROR_INTEGRAL = 0.0;
     }
 
-    SEG_PITCH_ERROR_INTEGRAL += SEG_PITCH_ERROR * T;
-    // SEG_PITCH_ERROR_DERIVATIVE = (SEG_PITCH_ERROR - SEG_PITCH_ERROR_PREV) / T;
-    SEG_PITCH_ERROR_DERIVATIVE = SEG_PITCH_RATE_COMMAND - Segway_ang_vel[1];
-    
-    double KP = SEG_PITCH_Kp * SEG_PITCH_ERROR;
-    double KI = SEG_PITCH_Ki * SEG_PITCH_ERROR_INTEGRAL;
-    double KD = SEG_PITCH_Kd * SEG_PITCH_ERROR_DERIVATIVE;
+    SEG_PITCH_RATE_ERROR_INTEGRAL += SEG_PITCH_RATE_ERROR * T;
+    SEG_PITCH_RATE_ERROR_DERIVATIVE = (SEG_PITCH_ERROR - SEG_PITCH_ERROR_PREV) / T;
+       
+    double KP = SEG_PITCH_RATE_Kp * SEG_PITCH_RATE_ERROR;
+    double KI = SEG_PITCH_RATE_Ki * SEG_PITCH_RATE_ERROR_INTEGRAL;
+    double KD = SEG_PITCH_RATE_Kd * SEG_PITCH_RATE_ERROR_DERIVATIVE;
 
     if(abs(KI) >= 0.8 * MAX_MOTOR_SPEED){
         KI = 0.8 * MAX_MOTOR_SPEED * sign(KI);
     }
 
     SEG_CONTROL_LAW[1] = KP + KI + KD;
-    if(abs(SEG_CONTROL_LAW[1]) >= 30.0){
-        SEG_CONTROL_LAW[1] = 30.0 * sign(SEG_CONTROL_LAW[1]);
+    if(abs(SEG_CONTROL_LAW[1]) >= MAX_MOTOR_SPEED){
+        SEG_CONTROL_LAW[1] = MAX_MOTOR_SPEED * sign(SEG_CONTROL_LAW[1]);
     }
-    SEG_PITCH_ERROR_PREV = SEG_PITCH_ERROR;
+    SEG_PITCH_RATE_ERROR_PREV = SEG_PITCH_RATE_ERROR;
 
     for(int i = 0; i < 4; i++){
         wheel_command[i] = (PWM_MAP_MATRIX[i][0] * SEG_CONTROL_LAW[0] +
@@ -476,11 +495,38 @@ void Segway_controller(double FILTERED_SEG_PITCH_COMMAND){
                             PWM_MAP_MATRIX[i][2] * SEG_CONTROL_LAW[2]);
 
         filtered_wheel_command[i] = low_pass_filter(wheel_command[i], filtered_wheel_command[i]);
-        // // 死區處理
-        // if (abs(filtered_wheel_command[i]) < 2.0) {
-        //         filtered_wheel_command[i] = 0.0;
-        //     }
     }
+}
+
+void Segway_Pitch_controller(double FILTERED_SEG_PITCH_COMMAND){
+    double pitch = attitude[1];
+
+    SEG_PITCH_ERROR = FILTERED_SEG_PITCH_COMMAND - pitch;
+    SEG_PITCH_ERROR = SEG_PITCH_ERROR * PI / 180.0;
+    
+    if(sign(FILTERED_SEG_PITCH_COMMAND) != sign(PRE_SEG_PITCH_COMMAND)){
+        SEG_PITCH_ERROR_INTEGRAL = 0.0;
+    }
+
+    SEG_PITCH_ERROR_INTEGRAL += SEG_PITCH_ERROR * T;
+    SEG_PITCH_ERROR_DERIVATIVE = (SEG_PITCH_ERROR - SEG_PITCH_ERROR_PREV) / T;
+    
+    
+    double KP = SEG_PITCH_Kp * SEG_PITCH_ERROR;
+    double KI = SEG_PITCH_Ki * SEG_PITCH_ERROR_INTEGRAL;
+    double KD = SEG_PITCH_Kd * SEG_PITCH_ERROR_DERIVATIVE;
+
+    if(abs(KI) >= 0.5 * MAX_PITCH_RATE){
+        KI = 0.5 * MAX_PITCH_RATE * sign(KI);
+    }
+
+    SEG_PITCH_TO_PITCH_RATE_CMD = KP + KI + KD;
+    if(abs(SEG_PITCH_TO_PITCH_RATE_CMD) >= MAX_PITCH_RATE){
+        SEG_PITCH_TO_PITCH_RATE_CMD = MAX_PITCH_RATE * sign(SEG_PITCH_TO_PITCH_RATE_CMD);
+    }
+
+    FILTERED_SEG_PITCH_TO_PITCH_RATE_CMD = low_pass_filter(SEG_PITCH_TO_PITCH_RATE_CMD, FILTERED_SEG_PITCH_TO_PITCH_RATE_CMD);
+    SEG_PITCH_ERROR_PREV = SEG_PITCH_ERROR;
 }
 
 void motor_controller(array<double, 4>& filtered_wheel_command) {
@@ -540,19 +586,33 @@ void attitude_init() {
 
 void print_data(){
 
-    // Serial.print(rc_command.aux2);
-    // Serial.print(" ");
+    for(int i = 0; i < 3; i++){
+        Serial.print(attitude[i] * PI / 180.0);
+        Serial.print(" ");
+    }
+
+    for(int i = 0; i < 3; i++){
+        Serial.print(Segway_ang_vel[i]);
+        Serial.print(" ");
+    }
+
     // Serial.print(rc_command.lateral, 3);
     // Serial.print(" ");
-    // Serial.print(rc_command.pitch, 3);
-    // Serial.print(" ");
+    Serial.print(rc_command.pitch * PI / 180.0, 3);
+    Serial.print(" ");
     // Serial.print(rc_command.yaw, 3);
     // Serial.print(" ");
+
     Serial.print(SEG_PITCH_ERROR);
     Serial.print(" ");
-    Serial.print(SEG_PITCH_ERROR_INTEGRAL);
+    Serial.print(SEG_PITCH_RATE_ERROR_INTEGRAL);
     Serial.print(" ");
-    Serial.print(SEG_PITCH_ERROR_DERIVATIVE);
+    Serial.print(FILTERED_SEG_PITCH_TO_PITCH_RATE_CMD);
+    Serial.print(" ");
+
+    Serial.print(SEG_PITCH_RATE_ERROR);
+    Serial.print(" ");
+    Serial.print(SEG_PITCH_RATE_ERROR_INTEGRAL);
     Serial.print(" ");
 
     for(int i = 0; i < 3; i++){
